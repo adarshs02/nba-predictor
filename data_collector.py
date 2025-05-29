@@ -7,6 +7,10 @@ import numpy as np
 import os # Added for os.getenv
 from dotenv import load_dotenv # Added for load_dotenv
 
+"""
+Collects data from the NBA API and stores it in a SQLite database.
+"""
+
 # Load environment variables from .env file
 load_dotenv()
 

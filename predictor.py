@@ -3,9 +3,10 @@ import sqlite3
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score
-import json # For saving JSON output
-import os # For API key, though summary_api.py handles its own
+import json
+import os
 from dotenv import load_dotenv
+import joblib
 
 """
 Predicts the outcome of an NBA game using a Random Forest Classifier. Current accuracy is right under 60%. There are no player based predictions yet. It only takes into account team stats.
@@ -29,8 +30,10 @@ load_dotenv()
 
 # Initialize variables
 DB_NAME = os.getenv("DB_NAME", "nba_data.db")
-home_team_name = "Oklahoma City Thunder"
-away_team_name = "Boston Celtics"
+MODEL_FILENAME = "nba_predictor_model.joblib"
+FEATURES_FILENAME = "feature_importances.joblib"
+home_team_name = "Charlotte Hornets"
+away_team_name = "Washington Wizards"
 
 def load_data():
     # ... (load_data function remains largely the same, ensuring teams_info_df is loaded) ...
@@ -194,18 +197,24 @@ def feature_engineering(raw_data_dict):
 
 
 def train_model(X_train, y_train):
-    # ... (train_model function remains the same) ...
+    """Trains the prediction model, saves it and feature importances, and returns them."""
     print("Model training...")
-    # Ensure X_train does not contain non-numeric if any slip through (e.g. game_id if not made index)
-    # Assuming features_for_model (X) is already cleaned in feature_engineering
     model = RandomForestClassifier(n_estimators=100, random_state=42)
     model.fit(X_train, y_train)
     
     importances = model.feature_importances_
     feature_names = X_train.columns
-    feature_importances = pd.Series(importances, index=feature_names).sort_values(ascending=False)
+    feature_importances_series = pd.Series(importances, index=feature_names).sort_values(ascending=False)
     
-    return model, feature_importances
+    try:
+        joblib.dump(model, MODEL_FILENAME)
+        print(f"Model saved to {MODEL_FILENAME}")
+        joblib.dump(feature_importances_series, FEATURES_FILENAME)
+        print(f"Feature importances saved to {FEATURES_FILENAME}")
+    except Exception as e:
+        print(f"Error saving model or feature importances: {e}")
+        
+    return model, feature_importances_series
 
 def evaluate_model(model, X_test, y_test):
     # ... (evaluate_model function remains the same) ...
@@ -324,57 +333,81 @@ def get_team_info_by_name(team_name_query, teams_info_df):
 if __name__ == "__main__":
     data = load_data()
     if data is None:
-        print("Exiting due to data loading issues.")
-        # exit() # Consider exiting if data load fails critically
+        exit("Exiting due to data loading issues.") # Simple exit for critical failure
+    # More robust check for essential dataframes
+    if not all(data.get(key) is not None and not data.get(key).empty for key in ["games", "team_logs", "teams_info"]):
+        exit("Essential dataframes (games, team_logs, teams_info) are missing or empty. Exiting.")
 
-    # Ensure data dict and its contents are not None before proceeding
-    if not data or data.get("games") is None or data.get("team_logs") is None or data.get("teams_info") is None:
-        print("Essential dataframes (games, team_logs, teams_info) are missing. Exiting.")
-        # exit()
-
-    # features_for_model (X) will have game_id as index
     X, y, full_game_details_df = feature_engineering(data) 
-
     if X.empty or y.empty:
-        print("Feature engineering resulted in empty data. Cannot train model. Exiting.")
-        # exit() 
+        exit("Feature engineering resulted in empty data. Cannot proceed. Exiting.")
 
-    # Check if we have enough data to split
-    if len(X) < 2 or len(y) < 2: # Basic check, train_test_split might have its own minimums
-        print(f"Not enough data to split for training and testing. Found {len(X)} samples. Needs at least 2.")
-        print("Consider collecting more data using data_collector.py for a wider date range.")
-        # exit()
-        # If you want to proceed with what you have for a single prediction (if possible),
-        # you might skip splitting and training, and just load a pre-trained model.
-        # For now, we'll assume training is desired if data is present.
-        # For demonstration, if less than, say, 10 samples, training might not be very meaningful.
-        # For the purpose of running the script, we'll allow it to proceed if len(X) > 0
-        # but train_test_split will fail if test_size leads to empty train/test set.
-        
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y if len(y.unique()) > 1 and len(y) * 0.2 >= 1 and (y.value_counts() >=1).all() else None)
-    
-    if X_train.empty or X_test.empty:
-        print("Training or testing set is empty after split. This can happen with very small datasets.")
-        print("If you wish to predict on a specific game without training, you'll need a pre-trained model and load its features.")
-        # For now, we will attempt to train if X_train is not empty, and skip evaluation if X_test is empty.
-        # exit()
-    
     model = None
     feature_importances = None
+    force_retrain = False # Set to True if you want to force retraining
 
-    if not X_train.empty:
+    # Try to load the model and feature importances
+    if os.path.exists(MODEL_FILENAME) and os.path.exists(FEATURES_FILENAME) and not force_retrain:
+        print(f"Loading saved model from {MODEL_FILENAME}...")
+        try:
+            model = joblib.load(MODEL_FILENAME)
+            print(f"Loading saved feature importances from {FEATURES_FILENAME}...")
+            feature_importances = joblib.load(FEATURES_FILENAME)
+            print("Model and feature importances loaded successfully.")
+        except Exception as e:
+            print(f"Error loading saved model or features: {e}. Will retrain.")
+            model = None # Ensure model is None if loading failed
+            feature_importances = None
+
+    if model is None or feature_importances is None: 
+        if len(X) < 2 or len(y) < 2: # Ensure enough data for splitting and training
+            # Correctly indented exit call
+            exit(f"Not enough data to train model. Found {len(X)} samples. Needs at least 2. Exiting.")
+
+        # Stratify logic improved slightly for robustness with small datasets
+        # Ensure test_size doesn't result in an empty training set for very small N
+        test_size = 0.2
+        if len(X) * (1 - test_size) < 1: # If training set would be < 1 sample
+            test_size = 1 / len(X) # Make test set 1 sample, train with rest (if len(X) > 1)
+            if len(X) * (1-test_size) < 1 and len(X) > 1: # if len(X) == 2, test_size = 0.5, train will be 1
+                 test_size = 0.5 # ensure train has at least 1
+            elif len(X) <=1: # cannot split
+                 exit(f"Cannot split data with only {len(X)} sample(s). Exiting")
+
+        # Stratification check: ensure at least 1 sample per class in y_train AND y_test if stratifying
+        # This is complex to guarantee perfectly for all tiny datasets with train_test_split.
+        # A simpler check: stratify if more than 1 class and enough samples per class for the split.
+        can_stratify = False
+        if len(y.unique()) > 1:
+            vc = y.value_counts()
+            # Check if smallest class is large enough for at least one sample in test set (approx)
+            if vc.min() >= max(1, int(len(y) * test_size)) and vc.min() > 1 : # also ensure smallest class > 1 for stratify
+                 can_stratify = True
+            else:
+                print(f"Warning: Cannot reliably stratify with small class sizes (counts: {vc.to_dict()}). Proceeding without stratification.") 
+        else: # Single class data
+            print("Warning: Only one class present in the target variable. Stratification is not applicable.")
+
+        X_train, X_test, y_train, y_test = train_test_split(X, y, 
+                                                            test_size=test_size, 
+                                                            random_state=42, 
+                                                            stratify=y if can_stratify else None)
+        
+        if X_train.empty: # Primary check for train set
+             exit("Training set is empty after split. This can happen with very small datasets. Exiting.")
+
+        print("No saved model found or retraining forced/needed. Training a new model...")
         model, feature_importances = train_model(X_train, y_train)
-        print("\nTop Global Feature Importances:")
+        print("\nTop Global Feature Importances (from new model):")
         print(feature_importances.head(10))
 
-        if not X_test.empty:
+        if not X_test.empty and not y_test.empty:
             evaluate_model(model, X_test, y_test)
         else:
-            print("\nSkipping model evaluation as the test set is empty.")
+            print("\nSkipping model evaluation as the test set (or y_test) is empty.")
     else:
-        print("\nSkipping model training as the training set is empty. Cannot make predictions without a model.")
-        # exit()
-
+        print("\nTop Global Feature Importances (from loaded model):")
+        print(feature_importances.head(10))
 
     # --- Prediction by Team Names ---
     if model and not full_game_details_df.empty and data.get("teams_info") is not None:
@@ -418,7 +451,7 @@ if __name__ == "__main__":
             print(f"No past game found in the database for {home_team_name_input} (Home) vs {away_team_name_input} (Away).")
             print("Try different team names or ensure data_collector.py has run for games involving these teams.")
     elif not model:
-        print("\nModel not trained. Cannot make predictions by team names.")
+        print("\nModel not trained or loaded. Cannot make predictions by team names.")
     else:
         print("\nCannot make predictions by team names due to missing data (full_game_details_df or teams_info).")
 

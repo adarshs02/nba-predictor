@@ -1,2 +1,8 @@
 nba_data.db
 .DS_Store
+llm_prompt_data.json
+.env.local
+__pycache__/summary_api.cpython-310.pyc
+.env
+model_check.py
+test.py

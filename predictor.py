@@ -1,13 +1,36 @@
 import pandas as pd
 import sqlite3
 from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier # Example model
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score
-# import re # No longer needed for parse_feature_name
+import json # For saving JSON output
+import os # For API key, though summary_api.py handles its own
+from dotenv import load_dotenv
 
-DB_NAME = "nba_data.db"
+"""
+Predicts the outcome of an NBA game using a Random Forest Classifier. Current accuracy is right under 60%. There are no player based predictions yet. It only takes into account team stats.
+"""
 
-# FEATURE_INTERPRETATIONS, parse_feature_name, and generate_team_advice will be removed.
+# Ensure summary_api import is correctly placed and attempted
+try:
+    from summary_api import generate_game_summary
+    summary_api_available = True
+    # ADDING DIAGNOSTIC PRINT HERE
+    import summary_api # Import the module itself to check its path
+    print(f"DEBUG: predictor.py - Successfully imported summary_api. Path: {summary_api.__file__}")
+except ImportError as e:
+    # MODIFIED DIAGNOSTIC PRINT HERE
+    print(f"DEBUG: predictor.py - Failed to import summary_api. Error: {e}")
+    summary_api_available = False
+    summary_api = None # To avoid NameError if __file__ was attempted on a non-existent module object.
+
+# Load environment variables from .env file (for OPENAI_API_KEY, DB_NAME, etc.)
+load_dotenv()
+
+# Initialize variables
+DB_NAME = os.getenv("DB_NAME", "nba_data.db")
+home_team_name = "Oklahoma City Thunder"
+away_team_name = "Boston Celtics"
 
 def load_data():
     # ... (load_data function remains largely the same, ensuring teams_info_df is loaded) ...
@@ -87,7 +110,7 @@ def calculate_team_rolling_stats(team_id, game_date, team_logs_df, window_size=1
     rolling_stats = rolling_stats.add_prefix('avg_')
     return rolling_stats
 
-
+#TODO: Improve alogirthm to have higher accuracy
 def feature_engineering(raw_data_dict):
     # ... (feature_engineering function updated to set game_id as index for X) ...
     if raw_data_dict is None:
@@ -193,7 +216,7 @@ def evaluate_model(model, X_test, y_test):
     return accuracy
 
 def predict_game(model, game_features_df, home_team_name="Home Team", away_team_name="Away Team", top_n_features=5, feature_importances=None):
-    """Predicts outcome, shows key factors, and prepares a prompt for an LLM to generate a game summary."""
+    """Predicts outcome, shows key factors, saves data for LLM, and calls summary_api to generate a game summary."""
     print(f"\nPredicting for: {home_team_name} (Home) vs. {away_team_name} (Away)")
     
     if isinstance(game_features_df, pd.Series):
@@ -220,7 +243,7 @@ def predict_game(model, game_features_df, home_team_name="Home Team", away_team_
         "away_team_name": away_team_name,
         "predicted_winner_name": winner_name,
         "predicted_loser_name": loser_name,
-        "win_probability_percent": f"{win_probability*100:.0f}%",
+        "win_probability_percent": f"{win_probability*100:.0f}", # Changed to not include %% symbol for cleaner JSON
         "home_stats": {},
         "away_stats": {}
     }
@@ -251,46 +274,29 @@ def predict_game(model, game_features_df, home_team_name="Home Team", away_team_
                     break
     llm_prompt_data["top_global_features"] = "; ".join(top_global_features_info) if top_global_features_info else "N/A"
 
+    # Save the llm_prompt_data to a JSON file
+    json_output_path = "llm_prompt_data.json"
+    try:
+        with open(json_output_path, 'w') as f:
+            json.dump(llm_prompt_data, f, indent=4)
+        print(f"\nLLM prompt data saved to: {json_output_path}")
+    except IOError as e:
+        print(f"Error saving LLM prompt data to JSON: {e}")
 
-    # Construct the LLM Prompt
-    prompt = f"""
-    Generate a short game preview paragraph (around 3-4 sentences) for an NBA game:
-    Home Team: {llm_prompt_data['home_team_name']}
-    Away Team: {llm_prompt_data['away_team_name']}
-
-    Prediction: {llm_prompt_data['predicted_winner_name']} to win with {llm_prompt_data['win_probability_percent']} confidence.
-
-    Recent Performance Metrics (last ~10 games):
-    {llm_prompt_data['home_team_name']} Stats:
-    - Points per game: {llm_prompt_data['home_stats'].get('pts', 'N/A')}
-    - Field Goal %%: {llm_prompt_data['home_stats'].get('fg_pct', 'N/A')}
-    - 3-Point %%: {llm_prompt_data['home_stats'].get('fg3_pct', 'N/A')}
-    - Assists per game: {llm_prompt_data['home_stats'].get('ast', 'N/A')}
-    - Rebounds per game: {llm_prompt_data['home_stats'].get('reb', 'N/A')}
-    - Turnovers per game: {llm_prompt_data['home_stats'].get('tov', 'N/A')}
-    - Win Percentage: {llm_prompt_data['home_stats'].get('win_pct', 'N/A')}
-
-    {llm_prompt_data['away_team_name']} Stats:
-    - Points per game: {llm_prompt_data['away_stats'].get('pts', 'N/A')}
-    - Field Goal %%: {llm_prompt_data['away_stats'].get('fg_pct', 'N/A')}
-    - 3-Point %%: {llm_prompt_data['away_stats'].get('fg3_pct', 'N/A')}
-    - Assists per game: {llm_prompt_data['away_stats'].get('ast', 'N/A')}
-    - Rebounds per game: {llm_prompt_data['away_stats'].get('reb', 'N/A')}
-    - Turnovers per game: {llm_prompt_data['away_stats'].get('tov', 'N/A')}
-    - Win Percentage: {llm_prompt_data['away_stats'].get('win_pct', 'N/A')}
-
-    Top influential factors for this prediction model globally: {llm_prompt_data['top_global_features']}
-
-    Based on the prediction and these statistics, analyze the {llm_prompt_data['predicted_winner_name']}'s chances.
-    Briefly mention their key strengths relative to the {llm_prompt_data['predicted_loser_name']}'s potential weaknesses,
-    or how the {llm_prompt_data['predicted_loser_name']} might challenge this prediction.
-    Keep the entire summary to a concise paragraph.
-    """
-
-    print("\n--- LLM Prompt for Game Summary ---")
-    print(prompt)
-    print("--- End of LLM Prompt ---")
-    print("\nNote: Copy the prompt above and paste it into an LLM (e.g., ChatGPT) to generate the game summary.")
+    # Call summary_api to generate and print summary
+    if summary_api_available:
+        print("\n--- Attempting to generate LLM Game Summary via summary_api.py ---")
+        game_summary = generate_game_summary(llm_prompt_data) # Pass the dictionary
+        if game_summary:
+            print("\n--- LLM Generated Game Summary ---")
+            print(game_summary)
+            print("--- End of LLM Game Summary ---")
+        else:
+            print("LLM summary could not be generated by summary_api.py.")
+    else:
+        # Fallback to printing the old prompt format if API not available (optional)
+        # For now, we just note it wasn't generated.
+        print("\nSkipping LLM summary generation as summary_api.py is not available.")
             
     return predicted_winner_numeric, win_probability
 
@@ -372,8 +378,8 @@ if __name__ == "__main__":
 
     # --- Prediction by Team Names ---
     if model and not full_game_details_df.empty and data.get("teams_info") is not None:
-        home_team_name_input = "Golden State Warriors"  # Example: Replace with user input or config
-        away_team_name_input = "Los Angeles Lakers"   # Example: Replace with user input or config
+        home_team_name_input = home_team_name
+        away_team_name_input = away_team_name
         
         print(f"\nAttempting to find a past game for {home_team_name_input} vs {away_team_name_input} for prediction...")
 

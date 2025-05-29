@@ -4,8 +4,14 @@ import pandas as pd
 import time # Import time for rate limiting
 import sqlite3
 import numpy as np
+import os # Added for os.getenv
+from dotenv import load_dotenv # Added for load_dotenv
 
-DB_NAME = "nba_data.db"
+# Load environment variables from .env file
+load_dotenv()
+
+# Get DB_NAME from environment variable, with a default fallback
+DB_NAME = os.getenv("DB_NAME", "nba_data.db")
 
 def init_db():
     """Initializes the SQLite database and creates tables if they don't exist."""
@@ -400,19 +406,18 @@ def get_player_career_stats(player_id):
 if __name__ == "__main__":
     init_db() # Initialize database and tables first
     
-    print("Fetching static data (teams)...") # Removed all active players from this print
+    print("Fetching static data (teams)...")
     all_teams_static = get_all_teams() # Fetches and stores all teams
     time.sleep(1)
 
     from datetime import date, timedelta
 
-    start_date = date(2023, 10, 24) 
-    end_date = date(2023, 11, 24)   
-    # For testing the efficiency change, you might want to use a smaller range where teams reappear
-    # start_date = date(2023, 10, 24)
-    # end_date = date(2023, 10, 28) # e.g., 5 days
+    # Set dates for the 2022-2023 NBA season (October to June)
+    start_date = date(2023, 10, 24) # Approximate start of 2023-24 season
+    end_date = date(2024, 4, 14)   # End of playoffs for 2023-24 season
 
-    print(f"\nStarting efficient data collection for game data and team logs from {start_date} to {end_date}...")
+    print(f"\nStarting efficient data collection for game data and team logs from {start_date} to {end_date} (2022-2023 season)...")
+    print("Note: This will take a significant amount of time due to the extended date range and API rate limiting.")
 
     current_date = start_date
     delta = timedelta(days=1)
@@ -424,11 +429,11 @@ if __name__ == "__main__":
         print(f"\n--- Processing data for {date_str_mmddyyyy} ---")
         
         games_on_date_df = get_scoreboard_for_date(game_date=date_str_mmddyyyy)
-        time.sleep(1.5) 
+        time.sleep(0.5) # Be respectful to the API
 
         if games_on_date_df is not None and not games_on_date_df.empty:
             season_year = current_date.year
-            if current_date.month < 10: 
+            if current_date.month < 9: # NBA season typically flips around Sept/Oct. For logs, this logic should derive season like "2022-23"
                 season_str_for_logs = f"{season_year - 1}-{str(season_year)[-2:]}"
             else: 
                 season_str_for_logs = f"{season_year}-{str(season_year + 1)[-2:]}"
@@ -436,23 +441,21 @@ if __name__ == "__main__":
 
             home_team_ids = pd.to_numeric(games_on_date_df['home_team_id'], errors='coerce').dropna().unique()
             away_team_ids = pd.to_numeric(games_on_date_df['away_team_id'], errors='coerce').dropna().unique()
-            # Concatenate numpy arrays directly, then apply pd.unique
-            # Addressing the FutureWarning: Pass a 1d array directly.
             combined_ids_array = np.concatenate((home_team_ids, away_team_ids))
-            team_ids_on_date = pd.unique(combined_ids_array) # This should now be fine
+            team_ids_on_date = pd.unique(combined_ids_array)
 
             print(f"Teams playing on {date_str_mmddyyyy}: {team_ids_on_date}")
 
-            for team_id_float in team_ids_on_date: # team_ids_on_date might be float from pd.unique on numeric data
+            for team_id_float in team_ids_on_date:
                 if pd.notna(team_id_float):
-                    team_id = int(team_id_float) # Convert to int
+                    team_id = int(team_id_float)
                     team_season_key = (team_id, season_str_for_logs)
                     
                     if team_season_key not in processed_team_season_logs:
                         print(f"Fetching team game logs for team ID: {team_id} for season {season_str_for_logs}")
                         get_team_game_logs_for_season(team_id=team_id, season_nullable=season_str_for_logs)
                         processed_team_season_logs.add(team_season_key)
-                        time.sleep(1.5) 
+                        time.sleep(0.5) # Respect API limits
                     else:
                         print(f"Team game logs for team ID: {team_id}, season {season_str_for_logs} already processed. Skipping.")
         else:
@@ -462,12 +465,12 @@ if __name__ == "__main__":
 
     print("\n--- Data collection loop finished ---")
 
-    # Fetch player game logs for specific players or a broader set if needed
-    # This part remains separate as player form might be desired for specific individuals.
-    target_season_for_player_logs = "2023-24"
-    jokic_id_static = "203999"
-    print(f"\nFetching sample player game logs for Nikola Jokic (ID: {jokic_id_static}) for season {target_season_for_player_logs}")
-    get_player_game_logs(player_id=jokic_id_static, season_nullable=target_season_for_player_logs)
-    time.sleep(1)
+    #TODO: Make more player based predictions and data collection
+    # # Update target season for sample player logs to match the collected year
+    # target_season_for_player_logs = "2022-23"
+    # jokic_id_static = "203999"
+    # print(f"\nFetching sample player game logs for Nikola Jokic (ID: {jokic_id_static}) for season {target_season_for_player_logs}")
+    # get_player_game_logs(player_id=jokic_id_static, season_nullable=target_season_for_player_logs)
+    # time.sleep(1)
 
     print("\nData collection script completed.") 

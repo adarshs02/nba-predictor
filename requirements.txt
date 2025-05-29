@@ -1,2 +1,6 @@
 nba_api
-pandas 
+pandas
+scikit-learn
+python-dotenv
+# openai # No longer needed
+groq # For Groq API

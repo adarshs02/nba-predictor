@@ -4,8 +4,8 @@ import pandas as pd
 import time # Import time for rate limiting
 import sqlite3
 import numpy as np
-import os # Added for os.getenv
-from dotenv import load_dotenv # Added for load_dotenv
+import os
+from dotenv import load_dotenv
 
 """
 Collects data from the NBA API and stores it in a SQLite database.

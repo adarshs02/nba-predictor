@@ -32,8 +32,8 @@ load_dotenv()
 DB_NAME = os.getenv("DB_NAME", "nba_data.db")
 MODEL_FILENAME = "nba_predictor_model.joblib"
 FEATURES_FILENAME = "feature_importances.joblib"
-home_team_name = "Charlotte Hornets"
-away_team_name = "Washington Wizards"
+home_team_name = "Portland Trail Blazers"
+away_team_name = "Oklahoma City Thunder"
 
 def load_data():
     # ... (load_data function remains largely the same, ensuring teams_info_df is loaded) ...

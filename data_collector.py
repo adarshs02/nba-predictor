@@ -469,6 +469,8 @@ if __name__ == "__main__":
 
     print("\n--- Data collection loop finished ---")
 
+    #TODO: Make more team based predictions and data collection to cover a larger part of history.
+
     #TODO: Make more player based predictions and data collection
     # # Update target season for sample player logs to match the collected year
     # target_season_for_player_logs = "2022-23"

@@ -7,6 +7,7 @@ import json
 import os
 from dotenv import load_dotenv
 import joblib
+import numpy as np
 
 """
 Predicts the outcome of an NBA game using a Random Forest Classifier. Current accuracy is right under 60%. There are no player based predictions yet. It only takes into account team stats.
@@ -81,7 +82,6 @@ def load_data():
             conn.close()
 
 def calculate_team_rolling_stats(team_id, game_date, team_logs_df, window_size=10):
-    # ... (calculate_team_rolling_stats function remains the same) ...
     team_logs_df['game_date'] = pd.to_datetime(team_logs_df['game_date'])
     game_date = pd.to_datetime(game_date)
 
@@ -90,32 +90,53 @@ def calculate_team_rolling_stats(team_id, game_date, team_logs_df, window_size=1
         (team_logs_df['game_date'] < game_date)
     ].sort_values(by='game_date', ascending=False).head(window_size)
 
-    if past_games.empty:
-        return pd.Series(dtype='float64') 
+    # Define the full list of stats we expect to calculate averages for
+    expected_avg_stats_cols = [
+        'pts', 'fgm', 'fga', 'fg_pct', 'fg3m', 'fg3a', 'fg3_pct', 
+        'ftm', 'fta', 'ft_pct', 'oreb', 'dreb', 'reb', 'ast', 
+        'stl', 'blk', 'tov', 'pf', 'win_pct'
+    ]
+    # Create a series of NaNs with prefixed names for the return structure
+    nan_series = pd.Series(index=['avg_' + col for col in expected_avg_stats_cols], dtype='float64')
 
-    stats_to_average = ['pts', 'fg_pct', 'fg3_pct', 'ast', 'reb', 'tov']
+    # Ensure a minimum number of games for meaningful stats, e.g., at least half the window size
+    if past_games.empty or len(past_games) < max(1, window_size // 2): 
+        return nan_series
+
+    # Stats to calculate direct averages for (excluding win_pct as it's handled separately)
+    stats_to_average = [
+        'pts', 'fgm', 'fga', 'fg_pct', 'fg3m', 'fg3a', 'fg3_pct', 
+        'ftm', 'fta', 'ft_pct', 'oreb', 'dreb', 'reb', 'ast', 
+        'stl', 'blk', 'tov', 'pf'
+    ]
     
+    # Ensure all stat columns are numeric, coercing errors, and fill missing columns with NA before mean
     for col in stats_to_average:
         if col in past_games.columns:
             past_games[col] = pd.to_numeric(past_games[col], errors='coerce')
         else: 
-            past_games[col] = pd.NA 
+            past_games[col] = pd.NA # Assign NA if column doesn't exist in past_games
     
-    rolling_stats = past_games[stats_to_average].mean(numeric_only=True)
+    # Calculate mean for the available stats
+    rolling_stats_values = past_games[stats_to_average].mean(numeric_only=True)
     
     # Calculate win_pct if 'wl' column exists
-    if 'wl' in past_games.columns:
-        rolling_stats['win_pct'] = (past_games['wl'] == 'W').mean()
+    if 'wl' in past_games.columns and not past_games['wl'].empty:
+        rolling_stats_values['win_pct'] = (past_games['wl'] == 'W').mean()
     else:
-        rolling_stats['win_pct'] = pd.NA # Or 0 or some other default
+        rolling_stats_values['win_pct'] = pd.NA
 
-    # Prefix stats with 'avg_' to match expected feature names if needed by LLM prompt structure
-    rolling_stats = rolling_stats.add_prefix('avg_')
+    # Prefix all calculated stats with 'avg_'
+    rolling_stats_values = rolling_stats_values.add_prefix('avg_')
+    
+    # Reindex to ensure the output series always has all expected avg_ columns, filling missing ones with NaN
+    # This ensures consistent feature set even if some stats were all NA or missing
+    rolling_stats = rolling_stats_values.reindex(nan_series.index)
+
     return rolling_stats
 
 #TODO: Improve alogirthm to have higher accuracy
 def feature_engineering(raw_data_dict):
-    # ... (feature_engineering function updated to set game_id as index for X) ...
     if raw_data_dict is None:
         print("Raw data is missing, cannot perform feature engineering.")
         return pd.DataFrame(), pd.Series(), pd.DataFrame()
@@ -124,28 +145,30 @@ def feature_engineering(raw_data_dict):
     team_logs_df = raw_data_dict.get("team_logs")
     teams_info_df = raw_data_dict.get("teams_info")
 
-    if games_df is None or games_df.empty or \
-       team_logs_df is None or team_logs_df.empty or \
-       teams_info_df is None or teams_info_df.empty:
-        print("Games, Team Logs, or Teams Info DataFrame is missing or empty. Cannot proceed.")
-        # Fallback to return empty structures matching the expected output
+    if not all(df is not None and not df.empty for df in [games_df, team_logs_df, teams_info_df]):
+        print("One or more essential DataFrames (games, team_logs, teams_info) are missing or empty.")
         return pd.DataFrame(), pd.Series(), pd.DataFrame()
-
 
     print("Starting feature engineering...")
 
+    # Convert dates and sort
     games_df['game_date'] = pd.to_datetime(games_df['game_date'])
-    games_df = games_df.sort_values(by=['game_date', 'game_id'])
+    team_logs_df['game_date'] = pd.to_datetime(team_logs_df['game_date'], errors='coerce')
+    games_df = games_df.sort_values(by=['game_date', 'game_id']).reset_index(drop=True)
 
-    games_df['home_team_score'] = pd.to_numeric(games_df['home_team_score'], errors='coerce').fillna(0)
-    games_df['away_team_score'] = pd.to_numeric(games_df['away_team_score'], errors='coerce').fillna(0)
+    # Target variable: HOME_TEAM_WINS
+    # Ensure scores are numeric, drop games with missing scores before calculating winner
+    games_df['home_team_score'] = pd.to_numeric(games_df['home_team_score'], errors='coerce')
+    games_df['away_team_score'] = pd.to_numeric(games_df['away_team_score'], errors='coerce')
+    games_df.dropna(subset=['home_team_score', 'away_team_score'], inplace=True)
     games_df['HOME_TEAM_WINS'] = (games_df['home_team_score'] > games_df['away_team_score']).astype(int)
 
     team_id_to_name = teams_info_df.set_index('id')['full_name'].to_dict()
-
-    all_features_list = []
     window_size = 10
-    team_logs_df['game_date'] = pd.to_datetime(team_logs_df['game_date'], errors='coerce')
+    all_features_list = []
+
+    # Pre-calculate last game date for each team for rest day calculation
+    team_last_game_date = {}
 
     for index, game_row in games_df.iterrows():
         game_id = game_row['game_id']
@@ -153,45 +176,109 @@ def feature_engineering(raw_data_dict):
         away_team_id = game_row['away_team_id']
         current_game_date = game_row['game_date']
 
+        # Calculate Rest Days and B2B
+        home_last_played = team_last_game_date.get(home_team_id)
+        away_last_played = team_last_game_date.get(away_team_id)
+
+        home_rest_days = (current_game_date - home_last_played).days if home_last_played else 14 # Default to high rest if no prior game found (e.g. start of season)
+        away_rest_days = (current_game_date - away_last_played).days if away_last_played else 14
+        
+        # Cap rest days (e.g., at 14) and handle B2B
+        home_rest_days = min(home_rest_days, 14)
+        away_rest_days = min(away_rest_days, 14)
+        
+        home_is_b2b = 1 if home_rest_days == 0 else 0 # Technically, rest_days would be 1 if played yesterday. If 0, means same day (error) or needs adjustment.
+        # Let's adjust: if game_date is 1 day after last_played_date, it's B2B (0 rest days between). 
+        # If last_played is current_game_date - 1 day, then rest_days = 1. This means B2B.
+        # If rest_days = (current_game_date - (current_game_date - 1 day)).days = 1, then it's B2B.
+        home_is_b2b = 1 if home_rest_days == 1 else 0
+        away_is_b2b = 1 if away_rest_days == 1 else 0
+
+        # Update last game date for teams
+        team_last_game_date[home_team_id] = current_game_date
+        team_last_game_date[away_team_id] = current_game_date
+
+        # Rolling Stats
         home_team_stats = calculate_team_rolling_stats(home_team_id, current_game_date, team_logs_df, window_size)
         away_team_stats = calculate_team_rolling_stats(away_team_id, current_game_date, team_logs_df, window_size)
 
-        game_features = {
-            'game_id': game_id, # Keep game_id for now, will be index later
-            'home_team_id': home_team_id,
-            'away_team_id': away_team_id,
-            'home_team_name': team_id_to_name.get(home_team_id, 'Unknown'),
-            'away_team_name': team_id_to_name.get(away_team_id, 'Unknown')
-        }
-        for stat_name, value in home_team_stats.items(): # stat_name will be avg_pts etc.
-            game_features[f'home_{stat_name}'] = value 
-        for stat_name, value in away_team_stats.items(): # stat_name will be avg_pts etc.
-            game_features[f'away_{stat_name}'] = value
+        game_features = {'game_id': game_id}
+        game_features.update({f'home_{stat}': val for stat, val in home_team_stats.items()})
+        game_features.update({f'away_{stat}': val for stat, val in away_team_stats.items()})
         
+        game_features['home_rest_days'] = home_rest_days
+        game_features['away_rest_days'] = away_rest_days
+        game_features['home_is_b2b'] = home_is_b2b
+        game_features['away_is_b2b'] = away_is_b2b
+
+        # Difference Features (ensure stats are present before diffing)
+        for stat_col_prefix in home_team_stats.index: # e.g. 'avg_pts'
+            stat_name = stat_col_prefix.replace('avg_', '') # 'pts'
+            if f'home_{stat_col_prefix}' in game_features and f'away_{stat_col_prefix}' in game_features:
+                game_features[f'diff_{stat_name}'] = game_features[f'home_{stat_col_prefix}'] - game_features[f'away_{stat_col_prefix}']
+            else:
+                game_features[f'diff_{stat_name}'] = np.nan # Ensure column exists even if data was missing
+        
+        game_features['diff_rest_days'] = home_rest_days - away_rest_days
+
+        # Add team names for context in full_game_details_df, not for model training directly
+        game_features['home_team_name'] = team_id_to_name.get(home_team_id, 'Unknown')
+        game_features['away_team_name'] = team_id_to_name.get(away_team_id, 'Unknown')
+        game_features['home_team_id'] = home_team_id # Keep for full_game_details_df
+        game_features['away_team_id'] = away_team_id # Keep for full_game_details_df
+
         all_features_list.append(game_features)
 
-    features_df_with_details = pd.DataFrame(all_features_list)
-    features_df_with_details = features_df_with_details.fillna(0) # Fill NaNs after stat calculation
+    if not all_features_list:
+        print("No features generated. Check data and loops.")
+        return pd.DataFrame(), pd.Series(), pd.DataFrame()
 
-    print(f"Feature engineering complete. Generated {len(features_df_with_details)} feature sets.")
+    features_df_with_details = pd.DataFrame(all_features_list)
     
+    # Merge with target variable
     final_df = pd.merge(features_df_with_details, games_df[['game_id', 'HOME_TEAM_WINS']], on='game_id', how='inner')
-    
+
     if final_df.empty:
         print("No data after merging features and target. Check game_id alignment.")
         return pd.DataFrame(), pd.Series(), pd.DataFrame()
 
-    target_final = final_df['HOME_TEAM_WINS']
+    # Drop rows with any NaN values in crucial feature columns before splitting
+    # Identify feature columns for the model (primarily diffs and B2B flags)
+    model_feature_columns = [col for col in final_df.columns if col.startswith('diff_')] + ['home_is_b2b', 'away_is_b2b']
     
-    # Set game_id as index for features_for_model (X)
-    # This X will be used for training and for looking up specific games for prediction
-    features_for_model = final_df.set_index('game_id').drop(columns=[
-        'HOME_TEAM_WINS', 
-        'home_team_id', 'away_team_id',
-        'home_team_name', 'away_team_name' 
-    ])
+    # Add other non-diff features if desired, e.g., individual team avg stats, but diffs are often preferred.
+    # For now, let's focus on diffs and B2B.
+    
+    # Ensure all selected model_feature_columns actually exist in final_df
+    model_feature_columns = [col for col in model_feature_columns if col in final_df.columns]
 
-    full_game_details_df = final_df[['game_id', 'home_team_id', 'home_team_name', 'away_team_id', 'away_team_name', 'HOME_TEAM_WINS']].set_index('game_id')
+    if not model_feature_columns:
+        print("No model feature columns were identified. Check feature generation logic.")
+        return pd.DataFrame(), pd.Series(), pd.DataFrame()
+
+    # Drop rows where any of these model features are NaN
+    final_df.dropna(subset=model_feature_columns, inplace=True)
+    
+    if final_df.empty:
+        print("All rows were dropped due to NaNs in model features. Check data quality or rolling window logic.")
+        return pd.DataFrame(), pd.Series(), pd.DataFrame()
+
+    print(f"Feature engineering complete. Generated {len(final_df)} clean feature sets for training/testing.")
+
+    target_final = final_df['HOME_TEAM_WINS']
+    features_for_model = final_df.set_index('game_id')[model_feature_columns]
+    
+    # full_game_details_df for context, prediction lookup, etc.
+    # It should contain all generated features and identifiers
+    full_game_details_cols = ['home_team_id', 'home_team_name', 'away_team_id', 'away_team_name', 'HOME_TEAM_WINS'] + model_feature_columns
+    # Add original home/away stats if needed for inspection
+    original_stat_cols = [col for col in features_df_with_details.columns if (col.startswith('home_avg_') or col.startswith('away_avg_')) and col not in model_feature_columns]
+    full_game_details_cols.extend(original_stat_cols)
+    full_game_details_cols.extend(['home_rest_days', 'away_rest_days']) # Ensure these are also in full_game_details_df
+    full_game_details_cols = list(dict.fromkeys(full_game_details_cols)) # Remove duplicates, preserve order
+    full_game_details_cols = [col for col in full_game_details_cols if col in final_df.columns] # Ensure all cols exist
+
+    full_game_details_df = final_df.set_index('game_id')[full_game_details_cols]
 
     return features_for_model, target_final, full_game_details_df
 

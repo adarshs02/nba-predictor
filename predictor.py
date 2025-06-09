@@ -1,15 +1,18 @@
 import pandas as pd
 import sqlite3
 from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score
+from xgboost import XGBClassifier
+from sklearn.metrics import accuracy_score, roc_auc_score
 import json
 import os
 from dotenv import load_dotenv
 import joblib
+import matplotlib.pyplot as plt
+import numpy as np
+from bird_framework import BIRDModel
 
 """
-Predicts the outcome of an NBA game using a Random Forest Classifier. Current accuracy is right under 60%. There are no player based predictions yet. It only takes into account team stats.
+Predicts the outcome of an NBA game using a XGBoost Classifier. Current accuracy is right under 60%. There are no player based predictions yet. It only takes into account team stats.
 """
 
 # Ensure summary_api import is correctly placed and attempted
@@ -31,8 +34,9 @@ load_dotenv()
 # Initialize variables
 DB_NAME = os.getenv("DB_NAME", "nba_data.db")
 MODEL_FILENAME = "nba_predictor_model.joblib"
+BIRD_MODEL_FILENAME = "nba_predictor_bird_model.joblib"
 FEATURES_FILENAME = "feature_importances.joblib"
-home_team_name = "Portland Trail Blazers"
+home_team_name = "Denver Nuggets"
 away_team_name = "Oklahoma City Thunder"
 
 def load_data():
@@ -113,7 +117,7 @@ def calculate_team_rolling_stats(team_id, game_date, team_logs_df, window_size=1
     rolling_stats = rolling_stats.add_prefix('avg_')
     return rolling_stats
 
-#TODO: Improve alogirthm to have higher accuracy
+# Algorithm now improved with BIRD (Bayesian Inference for Reliable Decisions) framework
 def feature_engineering(raw_data_dict):
     # ... (feature_engineering function updated to set game_id as index for X) ...
     if raw_data_dict is None:
@@ -196,118 +200,418 @@ def feature_engineering(raw_data_dict):
     return features_for_model, target_final, full_game_details_df
 
 
-def train_model(X_train, y_train):
-    """Trains the prediction model, saves it and feature importances, and returns them."""
-    print("Model training...")
-    model = RandomForestClassifier(n_estimators=100, random_state=42)
-    model.fit(X_train, y_train)
+def train_model(X_train, y_train, calibration_X=None, calibration_y=None):
+    """Trains the prediction model, saves it and feature importances, and returns them.
+    Now enhanced with BIRD framework for Bayesian uncertainty quantification.
     
-    importances = model.feature_importances_
+    Args:
+        X_train: Training features
+        y_train: Training labels
+        calibration_X: Optional separate calibration set features
+        calibration_y: Optional separate calibration set labels
+    """
+    # Initialize and train the model using XGBoost for improved accuracy
+    print("Using XGBoost for improved prediction accuracy")
+    base_model = XGBClassifier(
+        n_estimators=300,       # Number of boosting rounds
+        learning_rate=0.05,     # Slower learning rate for better generalization
+        max_depth=6,            # Control tree depth to prevent overfitting
+        min_child_weight=3,     # Minimum sum of instance weight needed in a child
+        gamma=0.1,              # Minimum loss reduction for partition
+        subsample=0.8,          # Use 80% of data per tree (prevents overfitting)
+        colsample_bytree=0.8,   # Use 80% of features per tree (prevents overfitting)
+        objective='binary:logistic',  # Binary classification with logistic function
+        scale_pos_weight=1,     # Balance positive/negative weights
+        random_state=42,        # Reproducibility
+        use_label_encoder=False,# Avoid deprecation warning
+        eval_metric='logloss'   # Evaluation metric
+    )
+    base_model.fit(X_train, y_train)
+    
+    # Save the base model for future use
+    joblib.dump(base_model, MODEL_FILENAME)
+    print(f"Base model saved to {MODEL_FILENAME}")
+    
+    # Save the feature importances
     feature_names = X_train.columns
-    feature_importances_series = pd.Series(importances, index=feature_names).sort_values(ascending=False)
+    importances = base_model.feature_importances_
+    feature_importances = pd.DataFrame({'feature': feature_names, 'importance': importances})
+    feature_importances = feature_importances.sort_values('importance', ascending=False)
+    joblib.dump(feature_importances, FEATURES_FILENAME)
+    print(f"Feature importances saved to {FEATURES_FILENAME}")
     
-    try:
-        joblib.dump(model, MODEL_FILENAME)
-        print(f"Model saved to {MODEL_FILENAME}")
-        joblib.dump(feature_importances_series, FEATURES_FILENAME)
-        print(f"Feature importances saved to {FEATURES_FILENAME}")
-    except Exception as e:
-        print(f"Error saving model or feature importances: {e}")
+    # Create a BIRD model with the base model and Monte Carlo sampling for uncertainty
+    # Use a low calibration_influence value (0.3) to improve accuracy while still benefiting from calibration
+    bird_model = BIRDModel(base_model=base_model, calibration_influence=0.3, n_samples=30, temperature=1.0)
+    
+    # If we have separate calibration data, use it to calibrate the uncertainty estimates
+    if calibration_X is not None and calibration_y is not None:
+        print("Calibrating BIRD model with separate calibration data...")
+        calibration_data = calibration_X.copy()
+        calibration_data['actual_winner'] = calibration_y
+        bird_model.calibrate(calibration_data)
+    elif len(X_train) > 100:  # If enough training data, use a portion for calibration
+        print("Creating calibration dataset with guaranteed mixed correctness...")
         
-    return model, feature_importances_series
+        # Make predictions on all training data
+        train_predictions = base_model.predict(X_train)
+        train_probs = base_model.predict_proba(X_train)[:, 1]  # Probability of class 1
+        
+        # Check where model was correct and incorrect (using numpy arrays for safety)
+        predictions_array = np.array(train_predictions)
+        actuals_array = np.array(y_train)
+        is_correct = predictions_array == actuals_array
+        
+        # Find positions (not DataFrame indices) where model was correct and incorrect
+        correct_positions = np.where(is_correct)[0]
+        incorrect_positions = np.where(~is_correct)[0]
+        
+        print(f"\n---------- CALIBRATION DIAGNOSTICS ----------")
+        print(f"Training set - Total: {len(y_train)}, Correct: {len(correct_positions)}, Incorrect: {len(incorrect_positions)}")
+        print(f"Base model accuracy on FULL training set: {100 * len(correct_positions) / len(y_train):.2f}%")
+        
+        # Print distribution of actual classes in training data
+        classes, counts = np.unique(actuals_array, return_counts=True)
+        print(f"Actual class distribution in training data: {dict(zip(classes, counts))}")
+        
+        # Analyze prediction confidence distribution
+        confidence_correct = [train_probs[i] if predictions_array[i] == 1 else 1-train_probs[i] for i in correct_positions]
+        confidence_incorrect = [train_probs[i] if predictions_array[i] == 1 else 1-train_probs[i] for i in incorrect_positions]
+        
+        # Calculate statistics on confidence
+        if len(confidence_correct) > 0:
+            avg_confidence_correct = sum(confidence_correct) / len(confidence_correct)
+            print(f"Average confidence when correct: {avg_confidence_correct:.4f}")
+        
+        if len(confidence_incorrect) > 0:
+            avg_confidence_incorrect = sum(confidence_incorrect) / len(confidence_incorrect)
+            print(f"Average confidence when incorrect: {avg_confidence_incorrect:.4f}")
+            
+        print("-----------------------------------------------\n")
+        
+        # Ensure we have both correct and incorrect examples
+        if len(correct_positions) == 0 or len(incorrect_positions) == 0:
+            print("WARNING: Model is either 100% accurate or 100% inaccurate on training data.")
+            print("Cannot calibrate without examples of both correct and incorrect predictions.")
+            print("Using raw probabilities without calibration.")
+        else:
+            # Calculate calibration set size (30% of training set, with a minimum size of 50)
+            cal_size = max(min(int(len(X_train) * 0.3), 500), 50)
+            print(f"Using a calibration set of size {cal_size}")
+            
+            # Determine sampling counts to ensure a mix of correct and incorrect predictions
+            # Aim for at least 25% of the minority class (correct or incorrect predictions)
+            minority_count = min(len(correct_positions), len(incorrect_positions))
+            majority_count = max(len(correct_positions), len(incorrect_positions))
+            
+            # Calculate how many samples to take from each group
+            minority_samples = max(int(cal_size * 0.25), 10)  # At least 10 samples from minority
+            minority_samples = min(minority_samples, minority_count)  # But no more than available
+            majority_samples = min(cal_size - minority_samples, majority_count)
+            
+            # Sample from correct and incorrect predictions
+            if len(correct_positions) <= len(incorrect_positions):
+                sampled_correct = np.random.choice(correct_positions, size=minority_samples, replace=False)
+                sampled_incorrect = np.random.choice(incorrect_positions, size=majority_samples, replace=False)
+            else:
+                sampled_correct = np.random.choice(correct_positions, size=majority_samples, replace=False)
+                sampled_incorrect = np.random.choice(incorrect_positions, size=minority_samples, replace=False)
+            
+            # Combine samples and shuffle
+            calibration_indices = np.concatenate([sampled_correct, sampled_incorrect])
+            np.random.shuffle(calibration_indices)
+            
+            # Create calibration dataset
+            calibration_X = X_train.iloc[calibration_indices].copy()
+            calibration_y = y_train.iloc[calibration_indices].copy()
+            
+            # --- Debug: Check base model accuracy on this calibration set ---
+            print("\n---------- CALIBRATION SAMPLE ANALYSIS ----------")
+            print(f"Sampled {minority_samples} from minority class and {majority_samples} from majority class")
+            print(f"Calibration set size: {len(calibration_indices)} samples")
+            
+            # Calculate fraction of training data in calibration
+            print(f"Calibration set is {100 * len(calibration_indices) / len(X_train):.1f}% of training data")
+            
+            # Check balance of correct/incorrect predictions in calibration set
+            cal_correct = np.sum(is_correct[calibration_indices])
+            cal_incorrect = len(calibration_indices) - cal_correct
+            print(f"Calibration samples: {cal_correct} correct, {cal_incorrect} incorrect predictions")
+            print(f"Correctness ratio: {cal_correct/len(calibration_indices):.2f} correct, {cal_incorrect/len(calibration_indices):.2f} incorrect")
+            
+            # Run predictions on calibration set
+            cal_predictions = base_model.predict(calibration_X)
+            cal_accuracy = accuracy_score(calibration_y, cal_predictions)
+            print(f"Base model accuracy on calibration samples: {cal_accuracy*100:.2f}%")
+            
+            # Calculate class distributions
+            y_cal_1d = calibration_y.values if isinstance(calibration_y, pd.Series) else calibration_y
+            pred_cal_1d = cal_predictions
+            
+            actual_counts = np.bincount(y_cal_1d.astype(int))
+            pred_counts = np.bincount(pred_cal_1d.astype(int))
+            
+            print(f"Actual outcomes in calibration set (0s, 1s): {actual_counts}")
+            print(f"Predicted outcomes by base model (0s, 1s): {pred_counts}")
+            print("-----------------------------------------------\n")
+            
+            # Verify calibration target diversity (most important check)
+            is_correct = (y_cal_1d == pred_cal_1d)
+            correct_count = np.sum(is_correct)
+            incorrect_count = len(is_correct) - correct_count
+            
+            print(f"DEBUG: Calibration target distribution - Correct: {correct_count}, Incorrect: {incorrect_count}")
+            print(f"DEBUG: This is what the LogisticRegression calibration model will train on")
+            
+            if correct_count == 0 or incorrect_count == 0:
+                print("ERROR: Failed to create a calibration set with both correct and incorrect predictions.")
+                print("Using raw probabilities without calibration.")
+            else:
+                # If we have a good mix, proceed with calibration
+                bird_model.calibrate(X_cal=calibration_X, y_cal=calibration_y)
+    
+    # Save the BIRD model
+    bird_model.save(BIRD_MODEL_FILENAME)
+    print(f"BIRD model saved to {BIRD_MODEL_FILENAME}")
+    
+    return bird_model, feature_importances
+
 
 def evaluate_model(model, X_test, y_test):
-    # ... (evaluate_model function remains the same) ...
-    print("Model evaluation placeholder") # Placeholder, should be actual evaluation
-    predictions = model.predict(X_test)
-    accuracy = accuracy_score(y_test, predictions)
-    print(f"Model Accuracy: {accuracy * 100:.2f}%")
-    return accuracy
+    """Evaluates model performance on test data with additional metrics for BIRD model."""
+    if hasattr(model, 'base_model'):
+        # It's a BIRD model
+        print("Evaluating BIRD model...")
+        base_model = model.base_model
+        
+        # Evaluate base model accuracy
+        y_pred_base = base_model.predict(X_test)
+        base_accuracy = accuracy_score(y_test, y_pred_base)
+        print(f"\nBase Model Accuracy on Test Data: {base_accuracy * 100:.2f}%")
+        
+        # Evaluate BIRD model with uncertainty
+        correct_predictions = 0
+        total_predictions = len(X_test)
+        reliability_scores = []
+        entropies = []
+        
+        for i in range(total_predictions):
+            features = X_test.iloc[[i]]
+            true_label = y_test.iloc[i]
+            
+            # Get prediction with uncertainty
+            result = model.predict_with_uncertainty(features)
+            pred_label = result['prediction']
+            reliability = result['reliability_score']
+            entropy = result['entropy']
+            
+            reliability_scores.append(reliability)
+            entropies.append(entropy)
+            
+            if pred_label == true_label:
+                correct_predictions += 1
+        
+        bird_accuracy = correct_predictions / total_predictions
+        print(f"BIRD Model Accuracy on Test Data: {bird_accuracy * 100:.2f}%")
+        print(f"Average Reliability Score: {np.mean(reliability_scores):.4f}")
+        print(f"Average Entropy: {np.mean(entropies):.4f}")
+        
+        # Plot reliability distribution
+        plt.figure(figsize=(10, 6))
+        plt.hist(reliability_scores, bins=20, alpha=0.7)
+        plt.title('Distribution of Prediction Reliability Scores')
+        plt.xlabel('Reliability Score')
+        plt.ylabel('Count')
+        plt.savefig('reliability_distribution.png')
+        print("Saved reliability distribution plot to 'reliability_distribution.png'")
+        
+        return {
+            'base_accuracy': base_accuracy,
+            'bird_accuracy': bird_accuracy,
+            'reliability_scores': reliability_scores,
+            'entropies': entropies
+        }
+    else:
+        # Regular model evaluation
+        y_pred = model.predict(X_test)
+        accuracy = accuracy_score(y_test, y_pred)
+        print(f"\nModel Accuracy on Test Data: {accuracy * 100:.2f}%")
+        return {'accuracy': accuracy}
 
 def predict_game(model, game_features_df, home_team_name="Home Team", away_team_name="Away Team", top_n_features=5, feature_importances=None):
-    """Predicts outcome, shows key factors, saves data for LLM, and calls summary_api to generate a game summary."""
-    print(f"\nPredicting for: {home_team_name} (Home) vs. {away_team_name} (Away)")
-    
-    if isinstance(game_features_df, pd.Series):
-        # If a Series is passed (e.g. from X.loc[game_id]), convert to DataFrame
-        game_features_for_prediction = game_features_df.to_frame().T
+    """Predicts outcome, shows key factors, saves data for LLM, and calls summary_api to generate a game summary.
+    Now enhanced with BIRD framework for Bayesian uncertainty quantification.
+    """
+    # Handle both single row DataFrame and Series
+    if isinstance(game_features_df, pd.DataFrame) and len(game_features_df) == 1:
+        game_features = game_features_df.iloc[0]
+    elif isinstance(game_features_df, pd.Series):
+        game_features = game_features_df
     else:
-        game_features_for_prediction = game_features_df
+        print("Error: prediction requires either a single-row DataFrame or a Series of features.")
+        return None
 
-    # Ensure column order matches training data if game_features_for_prediction was reconstructed
-    # This is usually handled if X_train.columns is used as a reference, but model.predict is robust if names match.
-    
-    prediction = model.predict(game_features_for_prediction)
-    probability = model.predict_proba(game_features_for_prediction)
-    
-    predicted_winner_numeric = prediction[0]
-    winner_name = home_team_name if predicted_winner_numeric == 1 else away_team_name
-    loser_name = away_team_name if predicted_winner_numeric == 1 else home_team_name
-    win_probability = probability[0][1] if predicted_winner_numeric == 1 else probability[0][0]
-    
-    print(f"Prediction: {winner_name} wins (Probability: {win_probability:.2f})")
+    # --- Align input features with the model's expected feature names ---
+    actual_sklearn_model = model.base_model if hasattr(model, 'base_model') else model
 
-    llm_prompt_data = {
-        "home_team_name": home_team_name,
-        "away_team_name": away_team_name,
-        "predicted_winner_name": winner_name,
-        "predicted_loser_name": loser_name,
-        "win_probability_percent": f"{win_probability*100:.0f}", # Changed to not include %% symbol for cleaner JSON
-        "home_stats": {},
-        "away_stats": {}
-    }
-
-    # Extract relevant stats from game_features_df for the prompt
-    # Assuming features are named like 'home_avg_pts', 'away_avg_fg_pct' etc.
-    current_game_values = game_features_for_prediction.iloc[0]
-    for col_name, value in current_game_values.items():
-        if col_name.startswith("home_avg_"):
-            stat_key = col_name.replace("home_avg_", "")
-            llm_prompt_data["home_stats"][stat_key] = f"{value:.2f}"
-        elif col_name.startswith("away_avg_"):
-            stat_key = col_name.replace("away_avg_", "")
-            llm_prompt_data["away_stats"][stat_key] = f"{value:.2f}"
-
-    # Add top N global features that influenced prediction
-    top_global_features_info = []
-    if feature_importances is not None:
-        print("\nKey global features influencing this type of matchup (and their values for this game):")
-        count = 0
-        for feature_name, importance_score in feature_importances.items():
-            if feature_name in current_game_values.index:
-                value = current_game_values[feature_name]
-                print(f"- {feature_name}: {value:.2f} (Global Importance: {importance_score:.4f})")
-                top_global_features_info.append(f"{feature_name} (value: {value:.2f}, importance: {importance_score:.4f})")
-                count += 1
-                if count >= top_n_features:
-                    break
-    llm_prompt_data["top_global_features"] = "; ".join(top_global_features_info) if top_global_features_info else "N/A"
-
-    # Save the llm_prompt_data to a JSON file
-    json_output_path = "llm_prompt_data.json"
-    try:
-        with open(json_output_path, 'w') as f:
-            json.dump(llm_prompt_data, f, indent=4)
-        print(f"\nLLM prompt data saved to: {json_output_path}")
-    except IOError as e:
-        print(f"Error saving LLM prompt data to JSON: {e}")
-
-    # Call summary_api to generate and print summary
-    if summary_api_available:
-        print("\n--- Attempting to generate LLM Game Summary via summary_api.py ---")
-        game_summary = generate_game_summary(llm_prompt_data) # Pass the dictionary
-        if game_summary:
-            print("\n--- LLM Generated Game Summary ---")
-            print(game_summary)
-            print("--- End of LLM Game Summary ---")
-        else:
-            print("LLM summary could not be generated by summary_api.py.")
+    if not hasattr(actual_sklearn_model, 'feature_names_in_') or actual_sklearn_model.feature_names_in_ is None:
+        print("Warning: Model does not have 'feature_names_in_'. Using features as-is. This might lead to errors if features mismatch.")
+        features_df_for_prediction = pd.DataFrame([game_features.values], columns=game_features.index)
     else:
-        # Fallback to printing the old prompt format if API not available (optional)
-        # For now, we just note it wasn't generated.
-        print("\nSkipping LLM summary generation as summary_api.py is not available.")
+        expected_feature_names = actual_sklearn_model.feature_names_in_
+        aligned_game_features_series = game_features.reindex(expected_feature_names)
+        
+        missing_features = aligned_game_features_series[aligned_game_features_series.isna()].index.tolist()
+        if missing_features:
+            print(f"Warning: {len(missing_features)} expected features were missing in input and filled with 0.0 for prediction: {missing_features}")
+            aligned_game_features_series = aligned_game_features_series.fillna(0.0)
             
-    return predicted_winner_numeric, win_probability
+        extra_features = list(set(game_features.index) - set(expected_feature_names))
+        if extra_features:
+            print(f"Warning: {len(extra_features)} input features were not expected by the model and were ignored: {extra_features}")
+
+        features_df_for_prediction = pd.DataFrame([aligned_game_features_series.values], columns=expected_feature_names)
+    # --- End of alignment logic ---
+
+    class_names = [away_team_name, home_team_name]  # 0=away wins, 1=home wins
+
+    if hasattr(model, 'predict_with_uncertainty'): # BIRD model
+        print("Using BIRD framework for prediction with uncertainty quantification...")
+        result = model.predict_with_uncertainty(features_df_for_prediction)
+        
+        prediction = result['prediction']
+        calibrated_probs = result['calibrated_probabilities']
+        # raw_probs = result['raw_probabilities'] # Not directly used later, can be kept if needed for debugging
+        reliability_score = result['reliability_score']
+        entropy = result['entropy']
+        
+        home_win_prob = calibrated_probs[1]
+        away_win_prob = calibrated_probs[0]
+        
+        fig = model.visualize_uncertainty(result, class_names=class_names, 
+                                         title=f"{away_team_name} vs {home_team_name} Prediction")
+        fig.savefig('prediction_uncertainty.png')
+        print("Saved uncertainty visualization to 'prediction_uncertainty.png'")
+    else: # Legacy model
+        print("Using regular model for prediction (no uncertainty quantification)...")
+        prediction = model.predict(features_df_for_prediction)[0]
+        try:
+            probs = model.predict_proba(features_df_for_prediction)[0]
+            home_win_prob = probs[1]
+            away_win_prob = probs[0]
+            reliability_score = None
+            entropy = None
+        except Exception as e:
+            print(f"Warning: Model doesn't support probability estimation or failed: {e}. Using decision only.")
+            home_win_prob = 1.0 if prediction == 1 else 0.0
+            away_win_prob = 1.0 if prediction == 0 else 0.0
+            reliability_score = None
+            entropy = None
+    
+    # Determine outcome
+    if prediction == 1:
+        predicted_winner_name_val = home_team_name
+        predicted_loser_name_val = away_team_name
+        win_probability_val = home_win_prob
+    else:
+        predicted_winner_name_val = away_team_name
+        predicted_loser_name_val = home_team_name
+        win_probability_val = away_win_prob
+        
+    print("\n" + "=" * 50)
+    print(f"PREDICTION: {predicted_winner_name_val} will {'WIN' if win_probability_val >= 0.8 else 'LIKELY WIN'} against {predicted_loser_name_val}")
+    print(f"Win Probability: {win_probability_val:.1%}")
+    
+    # If using BIRD, show uncertainty metrics
+    if reliability_score is not None:
+        confidence_level = ""
+        if reliability_score > 0.8:
+            confidence_level = "HIGH"
+        elif reliability_score > 0.6:
+            confidence_level = "MEDIUM"
+        else:
+            confidence_level = "LOW"
+            
+        print(f"Reliability Score: {reliability_score:.2f} ({confidence_level} CONFIDENCE)")
+        print(f"Prediction Entropy: {entropy:.4f} (lower = more certain)")
+    
+    # Display key factors (if we have feature importances)
+    if feature_importances is not None:
+        print("\nKEY FACTORS:")
+        
+        # Handle both Series and DataFrame format
+        if isinstance(feature_importances, pd.Series):
+            top_features = feature_importances.index[:top_n_features].tolist()
+        elif isinstance(feature_importances, pd.DataFrame) and 'feature' in feature_importances.columns:
+            top_features = feature_importances.head(top_n_features)['feature'].tolist()
+        else:
+            top_features = []
+            print("Warning: Feature importances format not recognized")
+            
+        # For each important feature
+        for feature in top_features:
+            if feature in game_features.index:
+                value = game_features[feature]
+                
+                # Handle categorical or special features
+                if "vs" in feature.lower() or "_vs_" in feature.lower():
+                    teams = feature.split("_vs_") if "_vs_" in feature else feature.split(" vs ")
+                    if len(teams) == 2:
+                        team1, team2 = teams
+                        print(f"- Matchup history between {team1} and {team2} is significant")
+                    else:
+                        print(f"- {feature}: {value}")
+                elif "diff" in feature.lower() or "advantage" in feature.lower():
+                    print(f"- {feature.replace('_', ' ').title()}: {value:.2f}")
+                else:
+                    # Attempt to make a readable statement about the feature
+                    readable_feature = feature.replace('_', ' ').title()
+                    if isinstance(value, (int, float)):
+                        print(f"- {readable_feature}: {value:.2f}")
+                    else:
+                        print(f"- {readable_feature}: {value}")
+    
+    # Prepare stats for summary (extracting from game_features which is a Series)
+    # Assuming game_features contains keys like 'home_avg_pts', 'away_avg_fg_pct' etc.
+    home_stats_dict = {col.replace('home_avg_', ''): game_features[col] for col in game_features.index if col.startswith('home_avg_')}
+    away_stats_dict = {col.replace('away_avg_', ''): game_features[col] for col in game_features.index if col.startswith('away_avg_')}
+
+    # Save prediction data for LLM summary
+    prediction_data = {
+        'home_team_name': home_team_name,
+        'away_team_name': away_team_name,
+        'predicted_winner_name': predicted_winner_name_val, # Key changed for summary_api
+        'predicted_loser_name': predicted_loser_name_val, # Added for consistency
+        'win_probability_percent': f"{win_probability_val:.1%}", # Formatted for summary_api
+        'win_probability_float': win_probability_val, # Keep original float for other uses
+        'reliability_score': reliability_score,
+        'entropy': entropy,
+        'top_features': top_features if 'top_features' in locals() else [],
+        'feature_values': {f: game_features.get(f, 'N/A') for f in (top_features if 'top_features' in locals() else [])},
+        'home_stats': home_stats_dict, # Added for summary_api
+        'away_stats': away_stats_dict  # Added for summary_api
+    }
+    
+    try:
+        with open('latest_prediction.json', 'w') as f:
+            json.dump(prediction_data, f, indent=4)
+        print("\nPrediction data saved to 'latest_prediction.json'")
+    except Exception as e:
+        print(f"Error saving prediction data: {e}")
+
+    # Use summary_api to generate a text summary if available
+    if 'summary_api_available' in globals() and summary_api_available:
+        try:
+            print("\nGenerating game summary...")
+            summary = generate_game_summary(prediction_data)
+            print("\nGAME SUMMARY:")
+            print(summary)
+        except Exception as e:
+            print(f"Error generating summary: {e}")
+    else:
+        print("\nSummary API not available. Install summary_api for game summaries.")
+    
+    return prediction_data
 
 # New helper function for team ID lookup
 def get_team_info_by_name(team_name_query, teams_info_df):
@@ -331,9 +635,17 @@ def get_team_info_by_name(team_name_query, teams_info_df):
     return None
 
 if __name__ == "__main__":
+    print("NBA Game Predictor with BIRD Framework")
+    
+    # Initialize this variable early to avoid NameError
+    using_bird = False
+    
     data = load_data()
-    if data is None:
-        exit("Exiting due to data loading issues.") # Simple exit for critical failure
+    
+    if not data:
+        print("Data loading failed. Exiting.")
+        exit(1)
+    
     # More robust check for essential dataframes
     if not all(data.get(key) is not None and not data.get(key).empty for key in ["games", "team_logs", "teams_info"]):
         exit("Essential dataframes (games, team_logs, teams_info) are missing or empty. Exiting.")
@@ -344,7 +656,7 @@ if __name__ == "__main__":
 
     model = None
     feature_importances = None
-    force_retrain = False # Set to True if you want to force retraining
+    force_retrain = True # Set to True to retrain model with current features
 
     # Try to load the model and feature importances
     if os.path.exists(MODEL_FILENAME) and os.path.exists(FEATURES_FILENAME) and not force_retrain:
@@ -363,51 +675,49 @@ if __name__ == "__main__":
         if len(X) < 2 or len(y) < 2: # Ensure enough data for splitting and training
             # Correctly indented exit call
             exit(f"Not enough data to train model. Found {len(X)} samples. Needs at least 2. Exiting.")
-
-        # Stratify logic improved slightly for robustness with small datasets
-        # Ensure test_size doesn't result in an empty training set for very small N
         test_size = 0.2
-        if len(X) * (1 - test_size) < 1: # If training set would be < 1 sample
-            test_size = 1 / len(X) # Make test set 1 sample, train with rest (if len(X) > 1)
-            if len(X) * (1-test_size) < 1 and len(X) > 1: # if len(X) == 2, test_size = 0.5, train will be 1
-                 test_size = 0.5 # ensure train has at least 1
-            elif len(X) <=1: # cannot split
-                 exit(f"Cannot split data with only {len(X)} sample(s). Exiting")
-
-        # Stratification check: ensure at least 1 sample per class in y_train AND y_test if stratifying
-        # This is complex to guarantee perfectly for all tiny datasets with train_test_split.
-        # A simpler check: stratify if more than 1 class and enough samples per class for the split.
-        can_stratify = False
-        if len(y.unique()) > 1:
-            vc = y.value_counts()
-            # Check if smallest class is large enough for at least one sample in test set (approx)
-            if vc.min() >= max(1, int(len(y) * test_size)) and vc.min() > 1 : # also ensure smallest class > 1 for stratify
-                 can_stratify = True
+        
+        # Handle stratification 
+        can_stratify = True
+        vc = y.value_counts() 
+        
+        if len(vc) > 1: # More than one class present
+            if vc.min() < 5: # Very small count for one class
+                can_stratify = False 
+                print("Warning: One class has very few examples, stratification disabled.")
             else:
-                print(f"Warning: Cannot reliably stratify with small class sizes (counts: {vc.to_dict()}). Proceeding without stratification.") 
+                print(f"Stratifying split by target values (counts: {vc.to_dict()})") 
         else: # Single class data
+            can_stratify = False
             print("Warning: Only one class present in the target variable. Stratification is not applicable.")
 
         X_train, X_test, y_train, y_test = train_test_split(X, y, 
-                                                            test_size=test_size, 
-                                                            random_state=42, 
-                                                            stratify=y if can_stratify else None)
+                                                        test_size=test_size, 
+                                                        random_state=42, 
+                                                        stratify=y if can_stratify else None)
         
         if X_train.empty: # Primary check for train set
              exit("Training set is empty after split. This can happen with very small datasets. Exiting.")
 
-        print("No saved model found or retraining forced/needed. Training a new model...")
+        print("Training a new model with BIRD framework...")
         model, feature_importances = train_model(X_train, y_train)
+        using_bird = True
         print("\nTop Global Feature Importances (from new model):")
-        print(feature_importances.head(10))
+        if isinstance(feature_importances, pd.DataFrame) and 'feature' in feature_importances.columns:
+            print(feature_importances[['feature', 'importance']].head(10))
+        else:
+            print(feature_importances.head(10))
 
         if not X_test.empty and not y_test.empty:
             evaluate_model(model, X_test, y_test)
         else:
             print("\nSkipping model evaluation as the test set (or y_test) is empty.")
     else:
-        print("\nTop Global Feature Importances (from loaded model):")
-        print(feature_importances.head(10))
+        print("\nTop Global Feature Importances:")
+        if isinstance(feature_importances, pd.DataFrame) and 'feature' in feature_importances.columns:
+            print(feature_importances[['feature', 'importance']].head(10))
+        else:
+            print(feature_importances.head(10))
 
     # --- Prediction by Team Names ---
     if model and not full_game_details_df.empty and data.get("teams_info") is not None:
@@ -416,10 +726,6 @@ if __name__ == "__main__":
         
         print(f"\nAttempting to find a past game for {home_team_name_input} vs {away_team_name_input} for prediction...")
 
-        # No need to use get_team_info_by_name if full_game_details_df already has names.
-        # We need home_team_id and away_team_id if we strictly want to match on IDs.
-        # full_game_details_df has home_team_name and away_team_name directly.
-        
         # Find the first game that matches the home and away team names
         # Ensure case-insensitivity if team names in DB might vary from input
         target_game_df = full_game_details_df[
@@ -440,11 +746,16 @@ if __name__ == "__main__":
                 actual_home_name = target_game_df.loc[game_id_to_predict, 'home_team_name']
                 actual_away_name = target_game_df.loc[game_id_to_predict, 'away_team_name']
 
-                predict_game(model, single_game_features, 
-                             home_team_name=actual_home_name, 
-                             away_team_name=actual_away_name, 
-                             top_n_features=5, 
-                             feature_importances=feature_importances)
+                if using_bird:
+                    print("Using BIRD framework for prediction with uncertainty quantification...")
+                else:
+                    print("Using regular model for prediction (no uncertainty quantification)...")
+                    
+                prediction_result = predict_game(model, single_game_features, 
+                                  home_team_name=actual_home_name, 
+                                  away_team_name=actual_away_name, 
+                                  top_n_features=5, 
+                                  feature_importances=feature_importances)
             else:
                 print(f"Could not find features for game_id {game_id_to_predict} in the feature set (X).")
         else:

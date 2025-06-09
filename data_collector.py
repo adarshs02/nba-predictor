@@ -16,6 +16,7 @@ load_dotenv()
 
 # Get DB_NAME from environment variable, with a default fallback
 DB_NAME = os.getenv("DB_NAME", "nba_data.db")
+SEASON_YEAR = "2023-24"
 
 def init_db():
     """Initializes the SQLite database and creates tables if they don't exist."""
@@ -191,7 +192,7 @@ def get_all_active_players():
     print(f"Stored/updated {len(players_to_insert)} active players in the database.")
     return all_nba_players_data # Still return for immediate use
 
-def get_player_game_logs(player_id, season_nullable="2023-24", season_type_nullable="Regular Season"):
+def get_player_game_logs(player_id, season_nullable=SEASON_YEAR, season_type_nullable="Regular Season"):
     """Fetches game logs for a specific player and season and stores them in the database."""
     print(f"Fetching game logs for player ID {player_id} for {season_nullable} {season_type_nullable}...")
     try:
@@ -266,7 +267,7 @@ def get_player_game_logs(player_id, season_nullable="2023-24", season_type_nulla
         traceback.print_exc()
         return pd.DataFrame()
 
-def get_team_game_logs_for_season(team_id, season_nullable="2023-24", season_type_nullable="Regular Season"):
+def get_team_game_logs_for_season(team_id, season_nullable=SEASON_YEAR, season_type_nullable="Regular Season"):
     """Fetches game logs for a specific team and season and stores them in the database."""
     print(f"Fetching game logs for team ID {team_id} for {season_nullable} {season_type_nullable}...")
     try:
@@ -471,7 +472,7 @@ if __name__ == "__main__":
 
     #TODO: Make more player based predictions and data collection
     # # Update target season for sample player logs to match the collected year
-    # target_season_for_player_logs = "2022-23"
+    # target_season_for_player_logs = "2023-24"
     # jokic_id_static = "203999"
     # print(f"\nFetching sample player game logs for Nikola Jokic (ID: {jokic_id_static}) for season {target_season_for_player_logs}")
     # get_player_game_logs(player_id=jokic_id_static, season_nullable=target_season_for_player_logs)

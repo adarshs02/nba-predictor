@@ -63,7 +63,7 @@ Recent Performance Metrics (last ~10 games):
 - Win Percentage: {llm_prompt_data['away_stats'].get('win_pct', 'N/A')}
 
 Top influential factors for this prediction model globally:
-{llm_prompt_data['top_global_features']}
+{llm_prompt_data['top_features']}
 
 Based on the prediction and these statistics, analyze the {llm_prompt_data['predicted_winner_name']}'s chances.
 Briefly mention their key strengths relative to the {llm_prompt_data['predicted_loser_name']}'s potential weaknesses,

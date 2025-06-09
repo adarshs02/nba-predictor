@@ -2,5 +2,10 @@ nba_api
 pandas
 scikit-learn
 python-dotenv
-# openai # No longer needed
-groq # For Groq API
+groq
+joblib
+seaborn
+matplotlib
+numpy
+scipy
+xgboost

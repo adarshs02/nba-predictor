@@ -31,9 +31,21 @@ def init_db():
         nickname TEXT,
         city TEXT,
         state TEXT,
-        year_founded INTEGER
+        year_founded INTEGER,
+        logo_url TEXT
     )
     """)
+
+    # Add logo_url column to teams table if it doesn't exist (for backward compatibility)
+    try:
+        cursor.execute("ALTER TABLE teams ADD COLUMN logo_url TEXT")
+        conn.commit()
+        print("Added 'logo_url' column to 'teams' table.")
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" in str(e):
+            pass  # Column already exists, which is fine
+        else:
+            raise
 
     # Players table
     cursor.execute("""
@@ -151,15 +163,10 @@ def get_all_teams():
     teams_to_insert = []
     for team in nba_teams_data:
         # Assuming 'id', 'full_name', 'abbreviation', 'nickname', 'city', 'state', 'year_founded' are keys
-        teams_to_insert.append((
-            team['id'], team['full_name'], team['abbreviation'],
-            team['nickname'], team['city'], team['state'], team['year_founded']
-        ))
+        logo_url = f"https://cdn.nba.com/logos/nba/{team['id']}/global/L/logo.svg"
+        teams_to_insert.append((team['id'], team['full_name'], team['abbreviation'], team['nickname'], team['city'], team['state'], team['year_founded'], logo_url))
     
-    cursor.executemany("""
-    INSERT OR IGNORE INTO teams (id, full_name, abbreviation, nickname, city, state, year_founded)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, teams_to_insert)
+    cursor.executemany("INSERT OR IGNORE INTO teams (id, full_name, abbreviation, nickname, city, state, year_founded, logo_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", teams_to_insert)
     
     conn.commit()
     conn.close()
@@ -416,11 +423,11 @@ if __name__ == "__main__":
 
     from datetime import date, timedelta
 
-    # Set dates for the 2022-2023 NBA season (October to June)
-    start_date = date(2023, 10, 24) # Approximate start of 2023-24 season
-    end_date = date(2024, 4, 14)   # End of playoffs for 2023-24 season
+    # Set dates for the 2024-2025 NBA season (October to June)
+    start_date = date(2024, 10, 22) # Approximate start of 2024-25 season
+    end_date = date(2025, 6, 14)   # Current date (today) to get the most recent data
 
-    print(f"\nStarting efficient data collection for game data and team logs from {start_date} to {end_date} (2022-2023 season)...")
+    print(f"\nStarting efficient data collection for game data and team logs from {start_date} to {end_date} (2024-2025 season)...")
     print("Note: This will take a significant amount of time due to the extended date range and API rate limiting.")
 
     current_date = start_date

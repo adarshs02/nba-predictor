@@ -35,44 +35,60 @@ def generate_game_summary(llm_prompt_data):
         return None
         
     system_prompt = (
-        "You are a sports analyst generating concise, insightful NBA game summaries "
-        "based on team statistics and win predictions. Use clear and professional language."
+        "You are a professional NBA sports analyst generating detailed, insightful game predictions "
+        "based on team statistics and machine learning models. Provide comprehensive analysis with "
+        "at least 150 words that includes strategic insights, team strengths/weaknesses, and key factors."
     )
 
     user_prompt = f"""
-Prediction: {llm_prompt_data['predicted_winner_name']} to win with {llm_prompt_data['win_probability_percent']}% confidence.
+Generate a detailed NBA game analysis based on the following prediction data. Your response must be at least 200 words and should provide comprehensive insights.
 
-Recent Performance Metrics (last ~10 games):
+PREDICTION SUMMARY:
+- Predicted Winner: {llm_prompt_data['predicted_winner_name']} 
+- Win Probability: {llm_prompt_data['win_probability_percent']}%
+- Matchup: {llm_prompt_data['home_team_name']} (Home) vs {llm_prompt_data['away_team_name']} (Away)
 
-{llm_prompt_data['home_team_name']} Stats:
+RECENT PERFORMANCE METRICS (Last ~10 games):
+
+{llm_prompt_data['home_team_name']} (Home Team) Stats:
 - Points per game: {llm_prompt_data['home_stats'].get('pts', 'N/A')}
-- Field Goal %: {llm_prompt_data['home_stats'].get('fg_pct', 'N/A')}
-- 3-Point %: {llm_prompt_data['home_stats'].get('fg3_pct', 'N/A')}
+- Field Goal Percentage: {llm_prompt_data['home_stats'].get('fg_pct', 'N/A')}
+- 3-Point Percentage: {llm_prompt_data['home_stats'].get('fg3_pct', 'N/A')}
 - Assists per game: {llm_prompt_data['home_stats'].get('ast', 'N/A')}
 - Rebounds per game: {llm_prompt_data['home_stats'].get('reb', 'N/A')}
 - Turnovers per game: {llm_prompt_data['home_stats'].get('tov', 'N/A')}
 - Win Percentage: {llm_prompt_data['home_stats'].get('win_pct', 'N/A')}
 
-{llm_prompt_data['away_team_name']} Stats:
+{llm_prompt_data['away_team_name']} (Away Team) Stats:
 - Points per game: {llm_prompt_data['away_stats'].get('pts', 'N/A')}
-- Field Goal %: {llm_prompt_data['away_stats'].get('fg_pct', 'N/A')}
-- 3-Point %: {llm_prompt_data['away_stats'].get('fg3_pct', 'N/A')}
+- Field Goal Percentage: {llm_prompt_data['away_stats'].get('fg_pct', 'N/A')}
+- 3-Point Percentage: {llm_prompt_data['away_stats'].get('fg3_pct', 'N/A')}
 - Assists per game: {llm_prompt_data['away_stats'].get('ast', 'N/A')}
 - Rebounds per game: {llm_prompt_data['away_stats'].get('reb', 'N/A')}
 - Turnovers per game: {llm_prompt_data['away_stats'].get('tov', 'N/A')}
 - Win Percentage: {llm_prompt_data['away_stats'].get('win_pct', 'N/A')}
 
-Top influential factors for this prediction model globally:
+KEY PREDICTION FACTORS:
 {llm_prompt_data['top_global_features']}
 
-Based on the prediction and these statistics, analyze the {llm_prompt_data['predicted_winner_name']}'s chances.
-Briefly mention their key strengths relative to the {llm_prompt_data['predicted_loser_name']}'s potential weaknesses,
-or how the {llm_prompt_data['predicted_loser_name']} might challenge this prediction.
-Keep the entire summary to a concise paragraph.
+ANALYSIS REQUIREMENTS:
+Please provide a comprehensive analysis that includes:
+
+1. **Prediction Rationale**: Explain why the model predicts {llm_prompt_data['predicted_winner_name']} to win with {llm_prompt_data['win_probability_percent']}% confidence.
+
+2. **Team Comparison**: Compare the key strengths and weaknesses of both teams based on their recent performance metrics. Highlight which statistical areas give the predicted winner their advantage.
+
+3. **Key Factors Analysis**: Discuss how the most important statistical factors (listed above) influence this prediction. Explain what these metrics tell us about each team's playing style and effectiveness.
+
+4. **Strategic Insights**: Provide insights into what each team needs to do to win, potential game flow scenarios, and areas where the underdog could potentially upset the prediction.
+
+5. **Home Court Advantage**: Consider the impact of {llm_prompt_data['home_team_name']} playing at home and how this might affect the outcome.
+
+Ensure your response is detailed, analytical, and provides valuable insights for basketball fans and analysts. Minimum 200 words required.
 """
 
     try:
-        # Assuming Groq API for chat completions is similar to OpenAI's v1.x
+        # Increased max_tokens to ensure at least 200 words
         response = client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[
@@ -80,7 +96,7 @@ Keep the entire summary to a concise paragraph.
                 {"role": "user", "content": user_prompt}
             ],
             temperature=0.7,
-            max_tokens=250
+            max_tokens=500  # Increased from 250 to ensure at least 200 words
         )
         return response.choices[0].message.content.strip()
     except Exception as e:

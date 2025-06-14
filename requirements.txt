@@ -2,5 +2,8 @@ nba_api
 pandas
 scikit-learn
 python-dotenv
-# openai # No longer needed
+lightgbm
 groq # For Groq API
+streamlit
+streamlit-option-menu
+psycopg2-binary

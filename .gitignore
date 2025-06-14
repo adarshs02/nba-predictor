@@ -8,3 +8,7 @@ model_check.py
 test.py
 nba_predictor_model.joblib
 feature_importances.joblib
+latest_prediction.json
+nba_predictor_bird_model.joblib
+__pycache__/bird_framework.cpython-310.pyc
+model_feature_columns.joblib

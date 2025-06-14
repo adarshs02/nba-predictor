@@ -3,5 +3,7 @@ pandas
 scikit-learn
 python-dotenv
 lightgbm
-# openai # No longer needed
 groq # For Groq API
+streamlit
+streamlit-option-menu
+psycopg2-binary

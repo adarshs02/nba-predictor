@@ -1195,14 +1195,25 @@ def predict_game(model, game_features_df, home_team_name="Home Team", away_team_
     # Extract relevant stats from game_features_df for the prompt
     # Assuming features are named like 'home_avg_pts', 'away_avg_fg_pct' etc.
     current_game_values = game_features_for_prediction.iloc[0]
+    
+    # Debug: Print available columns to understand the data structure
+    print(f"DEBUG: Available columns in game features: {list(current_game_values.index)[:10]}...")
+    
+    # Look for various possible column naming patterns
     for col_name, value in current_game_values.items():
-        if col_name.startswith("home_avg_"):
-            stat_key = col_name.replace("home_avg_", "")
+        # Check multiple possible patterns for home team stats
+        if col_name.startswith("home_avg_") or col_name.startswith("home_"):
+            stat_key = col_name.replace("home_avg_", "").replace("home_", "")
             llm_prompt_data["home_stats"][stat_key] = f"{value:.2f}"
-        elif col_name.startswith("away_avg_"):
-            stat_key = col_name.replace("away_avg_", "")
+        # Check multiple possible patterns for away team stats  
+        elif col_name.startswith("away_avg_") or col_name.startswith("away_"):
+            stat_key = col_name.replace("away_avg_", "").replace("away_", "")
             llm_prompt_data["away_stats"][stat_key] = f"{value:.2f}"
-
+    
+    # Debug: Print what stats were extracted
+    print(f"DEBUG: Extracted home_stats: {llm_prompt_data['home_stats']}")
+    print(f"DEBUG: Extracted away_stats: {llm_prompt_data['away_stats']}")
+    
     # Add top N global features that influenced prediction
     top_global_features_info = []
     if feature_importances is not None:
@@ -1264,6 +1275,188 @@ def get_team_info_by_name(team_name_query, teams_info_df):
         
     print(f"Warning: Team '{team_name_query}' not found in teams_info_df.")
     return None
+
+def get_prediction_data_for_teams(home_team_name_input, away_team_name_input):
+    """
+    Get prediction data for two teams without printing or calling summary_api directly.
+    Returns a dictionary with prediction data that can be used by the app.
+    
+    Args:
+        home_team_name_input (str): Name of the home team
+        away_team_name_input (str): Name of the away team
+    
+    Returns:
+        dict: Dictionary with prediction data, or None if prediction fails
+    """
+    try:
+        # Load data
+        data = load_data()
+        if data is None:
+            print("Error: Could not load data")
+            return None
+        
+        # Check for essential dataframes
+        if not all(data.get(key) is not None and not data.get(key).empty for key in ["games", "team_logs", "teams_info"]):
+            print("Error: Essential dataframes are missing or empty")
+            return None
+
+        # Feature engineering
+        X, y, full_game_details_df = feature_engineering(data) 
+        if X.empty or y.empty:
+            print("Error: Feature engineering resulted in empty data")
+            return None
+
+        # Load or train model
+        model = None
+        feature_importances = None
+        
+        # Try to load the model and feature importances
+        if os.path.exists(MODEL_FILENAME) and os.path.exists(FEATURES_FILENAME):
+            try:
+                model = joblib.load(MODEL_FILENAME)
+                feature_importances = joblib.load(FEATURES_FILENAME)
+                print("Model and feature importances loaded successfully.")
+            except Exception as e:
+                print(f"Error loading saved model or features: {e}")
+                model = None
+                feature_importances = None
+
+        # If no model loaded, need to train (simplified for app use)
+        if model is None or feature_importances is None:
+            if len(X) < 2 or len(y) < 2:
+                print("Error: Not enough data to train model")
+                return None
+            
+            # Quick train for app use
+            test_size = 0.2
+            if len(X) * (1 - test_size) < 1:
+                test_size = 0.5
+            
+            X_train, X_test, y_train, y_test = train_test_split(X, y, 
+                                                                test_size=test_size, 
+                                                                random_state=42)
+            
+            if X_train.empty:
+                print("Error: Training set is empty")
+                return None
+
+            model, feature_importances = train_model(X_train, y_train)
+
+        # Find game matching the teams
+        if not model or full_game_details_df.empty or data.get("teams_info") is None:
+            print("Error: Model or required data not available")
+            return None
+        
+        # Find the first game that matches the home and away team names (case-insensitive)
+        target_game_df = full_game_details_df[
+            (full_game_details_df['home_team_name'].str.lower() == home_team_name_input.lower()) &
+            (full_game_details_df['away_team_name'].str.lower() == away_team_name_input.lower())
+        ]
+
+        if target_game_df.empty:
+            print(f"No past game found for {home_team_name_input} vs {away_team_name_input}")
+            return None
+
+        game_id_to_predict = target_game_df.index[0]
+        
+        # Get features for this specific game
+        if game_id_to_predict not in X.index:
+            print(f"Could not find features for game_id {game_id_to_predict}")
+            return None
+            
+        single_game_features = X.loc[game_id_to_predict]
+        
+        # Get actual team names from full_game_details_df for consistent casing
+        actual_home_name = target_game_df.loc[game_id_to_predict, 'home_team_name']
+        actual_away_name = target_game_df.loc[game_id_to_predict, 'away_team_name']
+
+        # Get prediction data (modified version of predict_game logic)
+        return _get_prediction_data_internal(model, single_game_features, actual_home_name, actual_away_name, feature_importances)
+
+    except Exception as e:
+        print(f"Error in get_prediction_data_for_teams: {e}")
+        return None
+
+
+def _get_prediction_data_internal(model, game_features_df, home_team_name, away_team_name, feature_importances, top_n_features=5):
+    """
+    Internal function to get prediction data without printing or calling external APIs.
+    Modified version of predict_game that returns data instead of printing/calling APIs.
+    """
+    if isinstance(game_features_df, pd.Series):
+        game_features_for_prediction = game_features_df.to_frame().T
+    else:
+        game_features_for_prediction = game_features_df
+
+    # Load model feature columns to ensure alignment
+    try:
+        model_feature_columns = joblib.load('model_feature_columns.joblib')
+        
+        # Align features with model's expected features
+        missing_cols = [col for col in model_feature_columns if col not in game_features_for_prediction.columns]
+        
+        # Add missing features with zeros
+        for col in missing_cols:
+            game_features_for_prediction[col] = 0
+        
+        # Select and reorder columns to match model's expected features
+        game_features_for_prediction = game_features_for_prediction[model_feature_columns]
+    except FileNotFoundError:
+        print("Warning: model_feature_columns.joblib not found. Features may be misaligned.")
+    
+    prediction = model.predict(game_features_for_prediction)
+    probability = model.predict_proba(game_features_for_prediction)
+    
+    predicted_winner_numeric = prediction[0]
+    winner_name = home_team_name if predicted_winner_numeric == 1 else away_team_name
+    loser_name = away_team_name if predicted_winner_numeric == 1 else home_team_name
+    win_probability = probability[0][1] if predicted_winner_numeric == 1 else probability[0][0]
+    
+    llm_prompt_data = {
+        "home_team_name": home_team_name,
+        "away_team_name": away_team_name,
+        "predicted_winner_name": winner_name,
+        "predicted_loser_name": loser_name,
+        "win_probability_percent": f"{win_probability*100:.0f}",
+        "home_stats": {},
+        "away_stats": {}
+    }
+
+    # Extract relevant stats from game_features_df for the prompt
+    current_game_values = game_features_for_prediction.iloc[0]
+    
+    # Debug: Print available columns to understand the data structure
+    print(f"DEBUG: Available columns in game features: {list(current_game_values.index)[:10]}...")
+    
+    # Look for various possible column naming patterns
+    for col_name, value in current_game_values.items():
+        # Check multiple possible patterns for home team stats
+        if col_name.startswith("home_avg_") or col_name.startswith("home_"):
+            stat_key = col_name.replace("home_avg_", "").replace("home_", "")
+            llm_prompt_data["home_stats"][stat_key] = f"{value:.2f}"
+        # Check multiple possible patterns for away team stats  
+        elif col_name.startswith("away_avg_") or col_name.startswith("away_"):
+            stat_key = col_name.replace("away_avg_", "").replace("away_", "")
+            llm_prompt_data["away_stats"][stat_key] = f"{value:.2f}"
+    
+    # Debug: Print what stats were extracted
+    print(f"DEBUG: Extracted home_stats: {llm_prompt_data['home_stats']}")
+    print(f"DEBUG: Extracted away_stats: {llm_prompt_data['away_stats']}")
+    
+    # Add top N global features that influenced prediction
+    top_global_features_info = []
+    if feature_importances is not None:
+        count = 0
+        for feature_name, importance_score in feature_importances.items():
+            if feature_name in current_game_values.index:
+                value = current_game_values[feature_name]
+                top_global_features_info.append(f"{feature_name} (value: {value:.2f}, importance: {importance_score:.4f})")
+                count += 1
+                if count >= top_n_features:
+                    break
+    llm_prompt_data["top_global_features"] = "; ".join(top_global_features_info) if top_global_features_info else "N/A"
+
+    return llm_prompt_data
 
 if __name__ == "__main__":
     data = load_data()
@@ -1378,7 +1571,7 @@ if __name__ == "__main__":
                 predict_game(model, single_game_features, 
                              home_team_name=actual_home_name, 
                              away_team_name=actual_away_name, 
-                             top_n_features=5, 
+                             top_n_features=6, 
                              feature_importances=feature_importances)
             else:
                 print(f"Could not find features for game_id {game_id_to_predict} in the feature set (X).")

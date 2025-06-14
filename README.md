@@ -1,3 +1,3 @@
 # nba-predictor
 
-Using random forest classifier and BIRD to make a NBA game outcome prediction machine
+Using random forest classifier to make a NBA game outcome prediction machine

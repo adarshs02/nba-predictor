@@ -1,8 +1,13 @@
 nba_api
 pandas
+numpy
 scikit-learn
-python-dotenv
+xgboost
 lightgbm
+matplotlib
+seaborn
+joblib
+python-dotenv
 groq # For Groq API
 streamlit
 streamlit-option-menu

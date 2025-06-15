@@ -1,4 +1,3 @@
-nba_data.db
 .DS_Store
 llm_prompt_data.json
 .env.local

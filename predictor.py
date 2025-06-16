@@ -1,5 +1,5 @@
 import pandas as pd
-import sqlite3
+from supabase_client import supabase
 from sklearn.model_selection import train_test_split, cross_val_predict
 from sklearn.model_selection import train_test_split, RandomizedSearchCV, StratifiedKFold, cross_val_score
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, roc_curve, auc, classification_report, roc_auc_score
@@ -22,79 +22,66 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import joblib
 from dotenv import load_dotenv
+import sys
 
 """
 Predicts the outcome of an NBA game using an XGBoost Classifier optimized for higher accuracy (target: 70%+). 
 Uses advanced team statistics and feature engineering to improve prediction quality.
 """
 
-# Ensure summary_api import is correctly placed and attempted
+# --- API and Database Configuration ---
+load_dotenv()
+
 try:
     from summary_api import generate_game_summary
     summary_api_available = True
-    # ADDING DIAGNOSTIC PRINT HERE
-    import summary_api # Import the module itself to check its path
+    import summary_api
     print(f"DEBUG: predictor.py - Successfully imported summary_api. Path: {summary_api.__file__}")
 except ImportError as e:
-    # MODIFIED DIAGNOSTIC PRINT HERE
     print(f"DEBUG: predictor.py - Failed to import summary_api. Error: {e}")
     summary_api_available = False
-    summary_api = None # To avoid NameError if __file__ was attempted on a non-existent module object.
 
-# Load environment variables from .env file (for OPENAI_API_KEY, DB_NAME, etc.)
-load_dotenv()
+# Supabase client is now imported from supabase_client.py
+# It handles its own connection and credentials.
 
-# Initialize variables
-DB_NAME = os.getenv("DB_NAME", "nba_data.db")
+# --- Model and Feature Filenames ---
 MODEL_FILENAME = "nba_predictor_model.joblib"
 FEATURES_FILENAME = "feature_importances.joblib"
+
+# --- Default Team Names for CLI execution ---
 home_team_name = "Portland Trail Blazers"
 away_team_name = "Oklahoma City Thunder"
 
 def load_data():
-    # ... (load_data function remains largely the same, ensuring teams_info_df is loaded) ...
-    """Loads all necessary data from the SQLite database."""
-    print(f"Loading data from {DB_NAME}...")
-    conn = None
+    """Loads all necessary data from the Supabase database."""
+    print("Loading data from Supabase...")
     try:
-        conn = sqlite3.connect(DB_NAME)
-        
-        games_df = pd.read_sql_query("SELECT * FROM games", conn)
+        # Fetch data from the 'games' table
+        games_response = supabase.table('games').select('*').execute()
+        games_df = pd.DataFrame(games_response.data)
         print(f"Loaded {len(games_df)} entries from 'games' table.")
-        if games_df.empty:
-            print("Warning: 'games' table is empty. Ensure data_collector.py has run successfully.")
+        if games_df.empty: print("Warning: 'games' table is empty.")
 
-        player_logs_df = pd.read_sql_query("SELECT * FROM player_game_logs", conn)
-        print(f"Loaded {len(player_logs_df)} entries from 'player_game_logs' table.")
-        if player_logs_df.empty:
-            print("Warning: 'player_game_logs' table is empty.")
-
-        team_logs_df = pd.read_sql_query("SELECT * FROM team_game_logs", conn)
+        # Fetch data from the 'team_game_logs' table
+        team_logs_response = supabase.table('team_game_logs').select('*').execute()
+        team_logs_df = pd.DataFrame(team_logs_response.data)
         print(f"Loaded {len(team_logs_df)} entries from 'team_game_logs' table.")
-        if team_logs_df.empty:
-            print("Warning: 'team_game_logs' table is empty.")
+        if team_logs_df.empty: print("Warning: 'team_game_logs' table is empty.")
 
-        teams_info_df = pd.read_sql_query("SELECT * FROM teams", conn)
+        # Fetch data from the 'teams' table
+        teams_info_response = supabase.table('teams').select('*').execute()
+        teams_info_df = pd.DataFrame(teams_info_response.data)
         print(f"Loaded {len(teams_info_df)} entries from 'teams' table.")
-        if teams_info_df.empty:
-            print("Warning: 'teams' table is empty (needed for team names and IDs).")
+        if teams_info_df.empty: print("Warning: 'teams' table is empty.")
 
         return {
             "games": games_df,
-            "player_logs": player_logs_df,
             "team_logs": team_logs_df,
             "teams_info": teams_info_df
         }
-
-    except sqlite3.OperationalError as e:
-        print(f"Database error: {e}. Make sure '{DB_NAME}' exists and data_collector.py has run successfully.")
-        return None
     except Exception as e:
-        print(f"An error occurred during data loading: {e}")
+        print(f"An error occurred during data loading from Supabase: {e}", file=sys.stderr)
         return None
-    finally:
-        if conn:
-            conn.close()
 
 def calculate_team_rolling_stats(team_id, game_date, team_logs_df, window_size=10):
     """Calculate comprehensive team statistics including advanced metrics and trends."""
@@ -487,7 +474,6 @@ def feature_engineering(raw_data_dict):
     games_df = raw_data_dict.get("games")
     team_logs_df = raw_data_dict.get("team_logs")
     teams_info_df = raw_data_dict.get("teams_info")
-    player_logs_df = raw_data_dict.get("player_logs")
 
     if not all(df is not None and not df.empty for df in [games_df, team_logs_df, teams_info_df]):
         print("One or more essential DataFrames (games, team_logs, teams_info) are missing or empty.")

@@ -50,7 +50,11 @@ CREATE TABLE IF NOT EXISTS public.team_game_logs (
     pf BIGINT,
     pts BIGINT,
     plus_minus BIGINT,
+    ast_rank INTEGER,
+    pts_rank INTEGER,
+    reb_rank INTEGER,
     season_year TEXT,
+    created_at TIMESTAMP DEFAULT now(),
     PRIMARY KEY (game_id, team_id)
 );
 

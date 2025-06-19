@@ -5,6 +5,7 @@ import os
 import json
 from supabase_client import supabase
 from datetime import datetime
+from feature_utils import calculate_team_rolling_stats, create_head_to_head_features, calculate_rest_b2b_features
 
 # --- Constants ---
 MODEL_FILENAME = "nba_predictor_model.joblib"
@@ -12,7 +13,7 @@ FEATURES_FILENAME = "model_columns.joblib"
 IMPORTANCES_FILENAME = "feature_importances.joblib"
 
 # --- Team Names ---
-HOME_TEAM_NAME = "Golden State Warriors"
+HOME_TEAM_NAME = "Oklahoma City Thunder"
 AWAY_TEAM_NAME = "Los Angeles Lakers"
 
 
@@ -82,60 +83,93 @@ def get_team_recent_stats(team_id, team_logs_df, num_games=10):
 
 def generate_features_for_game(home_team_id, away_team_id, teams_df, team_logs_df):
     """
-    Generates a single feature vector for a given matchup.
-    This should mirror the feature engineering in train_model.py
+    Generates a single feature vector for a given matchup using feature_utils,
+    aligning with the feature names in model_columns.joblib.
     """
-    # Helper to calculate rolling stats for a single team based on its history
-    def _calculate_rolling_stats_for_team(team_id, logs_df, date_before=None):
-        team_logs = logs_df[logs_df['team_id'] == team_id].copy()
-        team_logs['game_date'] = pd.to_datetime(team_logs['game_date'])
-        
-        # If predicting for a future date, use all available historical data
-        if date_before:
-            team_logs = team_logs[team_logs['game_date'] < date_before]
+    game_date = datetime.now() # Use current date for predictions
 
-        team_logs = team_logs.sort_values('game_date', ascending=False)
+    # DEBUG: Inspect inputs before rolling stats calculation
+    print(f"[Debug generate_features_for_game] team_logs_df shape: {team_logs_df.shape}")
+    if not team_logs_df.empty and 'game_date' in team_logs_df.columns:
+        # Ensure game_date column is datetime for min/max operations
+        temp_game_dates = pd.to_datetime(team_logs_df['game_date'], errors='coerce')
+        print(f"[Debug generate_features_for_game] team_logs_df min game_date: {temp_game_dates.min()}, max game_date: {temp_game_dates.max()}")
+    print(f"[Debug generate_features_for_game] game_date for rolling stats: {game_date}")
 
-        # Define stats to calculate rolling averages for
-        stat_cols = ['pts', 'fgm', 'fga', 'fg_pct', 'fg3m', 'fg3a', 'fg3_pct', 
-                     'ftm', 'fta', 'ft_pct', 'oreb', 'dreb', 'reb', 'ast', 'stl', 'blk', 'tov', 'pf']
-        
-        for col in stat_cols:
-            team_logs[col] = pd.to_numeric(team_logs[col], errors='coerce')
+    # 1. Calculate rolling stats for home and away teams
+    # These are Series with keys like 'avg_pts', 'avg_fg_pct', 'efficiency_rating', 'avg_win_pct'
+    home_rolling_stats = calculate_team_rolling_stats(home_team_id, game_date, team_logs_df)
+    away_rolling_stats = calculate_team_rolling_stats(away_team_id, game_date, team_logs_df)
 
-        # Get the latest stats, which are the rolling averages before the 'current' game
-        # Here we take the mean of the last 10 games as a proxy for current form
-        latest_stats = team_logs.head(10)[stat_cols].mean().to_dict()
-        
-        # Add win percentage for the last 10 games
-        latest_stats['win_pct_last_10'] = (team_logs.head(10)['wl'] == 'W').mean()
+    if home_rolling_stats.isnull().all() or away_rolling_stats.isnull().all():
+        print(f"Warning: Rolling stats (all NaN) not available for one or both teams. home_id: {home_team_id}, away_id: {away_team_id}")
+        # Return an empty DataFrame with expected columns if possible, or just empty
+        # This helps the calling function's alignment step
+        expected_cols = joblib.load(FEATURES_FILENAME)
+        return pd.DataFrame(columns=expected_cols)
 
-        return latest_stats
+    # 2. Calculate rest and back-to-back features (dictionaries with 'rest_days', 'is_b2b')
+    home_rest_b2b = calculate_rest_b2b_features(home_team_id, game_date, team_logs_df)
+    away_rest_b2b = calculate_rest_b2b_features(away_team_id, game_date, team_logs_df)
 
-    # Get the latest stats for both teams (as of today)
-    home_stats = _calculate_rolling_stats_for_team(home_team_id, team_logs_df)
-    away_stats = _calculate_rolling_stats_for_team(away_team_id, team_logs_df)
+    # 3. (Optional) Head-to-head features - not explicitly in model_columns.joblib from output
+    # h2h_features = create_head_to_head_features(home_team_id, away_team_id, game_date, team_logs_df)
 
-    if not home_stats or not away_stats:
-        return pd.DataFrame() # Not enough data
+    # 4. Construct the feature dictionary according to model_columns.joblib
+    features = {}
 
-    # Create the feature vector
-    feature_vector = {}
-    for stat, value in home_stats.items():
-        feature_vector[f'HOME_AVG_{stat.upper()}'] = value
+    # Direct mapping for rest and b2b
+    features['home_rest_days'] = home_rest_b2b.get('rest_days', np.nan)
+    features['away_rest_days'] = away_rest_b2b.get('rest_days', np.nan)
+    features['home_is_b2b'] = home_rest_b2b.get('is_b2b', 0) # Default to 0 if not found
+    features['away_is_b2b'] = away_rest_b2b.get('is_b2b', 0)
+    features['diff_rest_days'] = features['home_rest_days'] - features['away_rest_days']
+
+    # Efficiency ratings
+    features['home_efficiency_rating'] = home_rolling_stats.get('efficiency_rating', np.nan)
+    features['away_efficiency_rating'] = away_rolling_stats.get('efficiency_rating', np.nan)
+
+    # Differential features from rolling stats
+    # model_columns: ['diff_pts', 'diff_fg_pct', 'diff_fg3_pct', 'diff_ft_pct', 'diff_reb', 'diff_ast', 'diff_tov', 'diff_stl', 'diff_win_pct']
+    stat_map = {
+        'pts': 'avg_pts',
+        'fg_pct': 'avg_fg_pct',
+        'fg3_pct': 'avg_fg3_pct',
+        'ft_pct': 'avg_ft_pct',
+        'reb': 'avg_reb',
+        'ast': 'avg_ast',
+        'tov': 'avg_tov',
+        'stl': 'avg_stl',
+        'win_pct': 'avg_win_pct' # from calculate_team_rolling_stats
+    }
+
+    for model_key, util_key in stat_map.items():
+        home_val = home_rolling_stats.get(util_key, np.nan)
+        away_val = away_rolling_stats.get(util_key, np.nan)
+        features[f'diff_{model_key}'] = home_val - away_val
+
+    # Interaction terms
+    # model_columns: ['fg_pct_interaction', 'fg3_pct_interaction', 'win_pct_interaction']
+    home_fg_pct = home_rolling_stats.get('avg_fg_pct', np.nan)
+    away_fg_pct = away_rolling_stats.get('avg_fg_pct', np.nan)
+    features['fg_pct_interaction'] = home_fg_pct * away_fg_pct
+
+    home_fg3_pct = home_rolling_stats.get('avg_fg3_pct', np.nan)
+    away_fg3_pct = away_rolling_stats.get('avg_fg3_pct', np.nan)
+    features['fg3_pct_interaction'] = home_fg3_pct * away_fg3_pct
+
+    home_win_pct = home_rolling_stats.get('avg_win_pct', np.nan)
+    away_win_pct = away_rolling_stats.get('avg_win_pct', np.nan)
+    features['win_pct_interaction'] = home_win_pct * away_win_pct
     
-    for stat, value in away_stats.items():
-        feature_vector[f'AWAY_AVG_{stat.upper()}'] = value
-
-    # Add differential features
-    for stat in home_stats.keys():
-        home_val = home_stats.get(stat, 0)
-        away_val = away_stats.get(stat, 0)
-        feature_vector[f'AVG_{stat.upper()}_diff'] = home_val - away_val
-
-    # TODO: Add head-to-head features if applicable
-
-    return pd.DataFrame([feature_vector]) # Placeholder
+    # Ensure column order matches model_columns.joblib
+    df = pd.DataFrame([features])
+    expected_cols = joblib.load(FEATURES_FILENAME)
+    # Add any missing expected columns with NaN (or 0 if preferred, though alignment later handles 0s)
+    for col in expected_cols:
+        if col not in df.columns:
+            df[col] = np.nan # Or 0, but subsequent alignment in get_prediction_data_for_teams uses 0
+    return df[expected_cols] # Return DataFrame with columns in the exact expected order
 
 def get_prediction_data_for_teams(home_team_name, away_team_name):
     """
@@ -156,14 +190,52 @@ def get_prediction_data_for_teams(home_team_name, away_team_name):
     # 2. Fetch Data from Supabase
     try:
         teams_response = supabase.table('teams').select('id, full_name, abbreviation, logo_url').execute()
-        logs_response = supabase.table('team_game_logs').select('*').execute()
-        
-        if not teams_response.data or not logs_response.data:
-            return {"error": "Could not fetch teams or game logs from the database."}
+        # Implement pagination to fetch all team_game_logs
+        all_logs_data = []
+        page_size = 1000  # Default/max limit per request by Supabase
+        current_offset = 0
+        while True:
+            # Fetch a page of game logs
+            page_response = supabase.table('team_game_logs') \
+                                  .select('*') \
+                                  .range(current_offset, current_offset + page_size - 1) \
+                                  .execute()
+            
+            if not page_response.data:
+                # No more data or an error occurred on this page fetch
+                if current_offset == 0: # Failed on the very first fetch
+                    return {"error": "Could not fetch any game logs from the database."}
+                break # Stop if no data returned for the current page
+
+            all_logs_data.extend(page_response.data)
+
+            if len(page_response.data) < page_size:
+                break  # Last page fetched
+            
+            current_offset += page_size
+
+        if not teams_response.data or not all_logs_data:
+            return {"error": "Could not fetch teams or game logs (after pagination) from the database."}
 
         teams_df = pd.DataFrame(teams_response.data)
-        team_logs_df = pd.DataFrame(logs_response.data)
+        team_logs_df = pd.DataFrame(all_logs_data)
         team_logs_df['game_date'] = pd.to_datetime(team_logs_df['game_date'])
+
+        # DEBUG: Check team_logs_df content for a specific team ID before passing it on
+        print(f"[Debug predictor] Shape of full team_logs_df after loading: {team_logs_df.shape}")
+        problematic_team_id_to_check = 1610612738 # Boston Celtics ID
+        # Ensure 'team_id' column is of the correct type for comparison, Supabase might return it as string or number
+        if 'team_id' in team_logs_df.columns:
+            # Attempt conversion to int, coercing errors for robustness if mixed types exist
+            team_logs_df['team_id'] = pd.to_numeric(team_logs_df['team_id'], errors='coerce').astype('Int64') # Use Int64 for nullable integers
+            
+            boston_logs_in_predictor_df = team_logs_df[team_logs_df['team_id'] == problematic_team_id_to_check]
+            print(f"[Debug predictor] For team ID {problematic_team_id_to_check} (Boston), found {len(boston_logs_in_predictor_df)} rows in loaded team_logs_df.")
+            if not boston_logs_in_predictor_df.empty:
+                print(f"[Debug predictor] Date range for team {problematic_team_id_to_check} in loaded team_logs_df: {boston_logs_in_predictor_df['game_date'].min()} to {boston_logs_in_predictor_df['game_date'].max()}")
+        else:
+            print(f"[Debug predictor] 'team_id' column not found in team_logs_df.")
+
     except Exception as e:
         return {"error": f"Database error: {e}"}
 
@@ -186,6 +258,9 @@ def get_prediction_data_for_teams(home_team_name, away_team_name):
         if col not in feature_vector_df.columns:
             feature_vector_df[col] = 0
     feature_vector_df = feature_vector_df[feature_names]
+
+    # Ensure the columns attribute is a fresh pd.Index object from feature_names
+    feature_vector_df.columns = pd.Index(feature_names)
 
     # 6. Make Prediction
     prediction = model.predict(feature_vector_df)

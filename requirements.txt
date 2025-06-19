@@ -12,3 +12,4 @@ groq # For Groq API
 streamlit
 streamlit-option-menu
 psycopg2-binary
+SQLAlchemy

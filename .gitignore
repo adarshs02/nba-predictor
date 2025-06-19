@@ -11,3 +11,16 @@ latest_prediction.json
 nba_predictor_bird_model.joblib
 __pycache__/bird_framework.cpython-310.pyc
 model_feature_columns.joblib
+__pycache__/predictor.cpython-310.pyc
+__pycache__/supabase_client.cpython-310.pyc
+__pycache__/db_schema.cpython-310.pyc
+__pycache__/predictor.cpython-310.pyc
+dbtest.py
+calibration_plot.png
+confusion_matrix.png
+roc_curve.png
+feature_importances.png
+__pycache__/feature_utils.cpython-310.pyc
+test_supabase.py
+feature_importance.png
+check_team_logs.py

@@ -357,8 +357,13 @@ def main():
             try:
                 # Get prediction data from your existing predictor
                 prediction_data = get_prediction_data_for_teams(final_home_team, final_away_team)
+
+                # Check if predictor.py returned an error
+                if 'error' in prediction_data:
+                    st.error(f"❌ Prediction Error: {prediction_data['error']}")
+                    return # Stop further processing
                 
-                if prediction_data is None:
+                if prediction_data is None: # This case might be less likely if predictor.py always returns a dict
                     st.error("❌ Could not find data for this matchup. Please ensure both team names are correct and that historical data exists for these teams.")
                     return
                 

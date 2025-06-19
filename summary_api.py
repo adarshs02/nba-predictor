@@ -30,6 +30,11 @@ else:
 # print(f"DEBUG: In summary_api.py, loaded API_KEY: '{api_key[:5] if api_key else None}...'")
 
 def generate_game_summary(llm_prompt_data):
+    if 'error' in llm_prompt_data:
+        error_message = llm_prompt_data['error']
+        print(f"Error in summary_api.py: Cannot generate summary because prediction data contains an error: {error_message}")
+        return f"Could not generate AI summary: {error_message}"
+
     if not client:
         print("Error in summary_api.py: Groq client not initialized. Missing API Key?")
         return None

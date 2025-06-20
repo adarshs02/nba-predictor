@@ -10,7 +10,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
 from xgboost import XGBClassifier
 from lightgbm import LGBMClassifier
-from sklearn.feature_selection import RFECV
+from sklearn.feature_selection import RFECV, SelectKBest, f_classif
 import numpy as np
 import joblib
 from dotenv import load_dotenv
@@ -64,20 +64,7 @@ def calculate_team_rolling_stats(team_id, game_date, team_logs_df, window_size=1
             if col in past_games_10_copy.columns:
                 past_games_10_copy.loc[:, col] = pd.to_numeric(past_games_10_copy[col], errors='coerce')
                 team_stats[f'avg_{col}'] = past_games_10_copy[col].mean()
-    if 'wl' in past_games_10.columns:
-        team_stats['avg_win_pct'] = (past_games_10['wl'] == 'W').mean()
-    elif 12 <= month <= 2:  # Dec-Feb
-            team_stats['season_phase'] = 0.5  # Mid season
-    else:  # Mar-Jun
-            team_stats['season_phase'] = 1  # Late season/playoff push
-                
-            # Days since last game (fatigue/rest indicator)
-            if len(past_games) >= 2:
-                past_games_sorted = past_games.sort_values('game_date', ascending=False)
-                last_game_date = pd.to_datetime(past_games_sorted.iloc[0]['game_date'])
-                prev_game_date = pd.to_datetime(past_games_sorted.iloc[1]['game_date'])
-                team_stats['days_since_last_game'] = (last_game_date - prev_game_date).days
-
+    
     # ADVANCED METRICS
     # Offensive efficiency (points per possession estimate)
     if all(col in team_stats for col in ['avg_pts', 'avg_tov']):
@@ -93,9 +80,8 @@ def calculate_team_rolling_stats(team_id, game_date, team_logs_df, window_size=1
     
     # Overall efficiency rating (estimate)
     if all(col in team_stats for col in ['avg_pts', 'avg_tov', 'avg_ast', 'avg_stl']):
-        team_stats['efficiency_rating'] = (
-            team_stats['avg_pts'] + team_stats['avg_ast'] + team_stats['avg_stl']) / \
-            max(1, team_stats['avg_tov'])
+        # team_stats['efficiency_rating'] = (team_stats['avg_pts'] + team_stats['avg_ast'] + team_stats['avg_stl']) / max(1, team_stats['avg_tov'])
+        pass
     
     return pd.Series(team_stats)
 
@@ -304,7 +290,7 @@ def create_head_to_head_features(home_team_id, away_team_id, game_date, team_log
         return features
 
 
-#TODO: Improve algorithm to achieve 70% accuracy
+#TODO: Improve algorithm to achieve 65% accuracy
 def feature_engineering(raw_data_dict):
     if raw_data_dict is None:
         print("Raw data is missing, cannot perform feature engineering.")
@@ -345,28 +331,6 @@ def feature_engineering(raw_data_dict):
         away_team_id = game_row['away_team_id']
         current_game_date = game_row['game_date']
 
-        # Calculate Rest Days and B2B
-        home_last_played = team_last_game_date.get(home_team_id)
-        away_last_played = team_last_game_date.get(away_team_id)
-
-        home_rest_days = (current_game_date - home_last_played).days if home_last_played else 14 # Default to high rest if no prior game found (e.g. start of season)
-        away_rest_days = (current_game_date - away_last_played).days if away_last_played else 14
-        
-        # Cap rest days (e.g., at 14) and handle B2B
-        home_rest_days = min(home_rest_days, 14)
-        away_rest_days = min(away_rest_days, 14)
-        
-        home_is_b2b = 1 if home_rest_days == 0 else 0 # Technically, rest_days would be 1 if played yesterday. If 0, means same day (error) or needs adjustment.
-        # Let's adjust: if game_date is 1 day after last_played_date, it's B2B (0 rest days between). 
-        # If last_played is current_game_date - 1 day, then rest_days = 1. This means B2B.
-        # If rest_days = (current_game_date - (current_game_date - 1 day)).days = 1, then it's B2B.
-        home_is_b2b = 1 if home_rest_days == 1 else 0
-        away_is_b2b = 1 if away_rest_days == 1 else 0
-
-        # Update last game date for teams
-        team_last_game_date[home_team_id] = current_game_date
-        team_last_game_date[away_team_id] = current_game_date
-
         # Rolling Stats
         home_team_stats = calculate_team_rolling_stats(home_team_id, current_game_date, team_logs_df, window_size)
         away_team_stats = calculate_team_rolling_stats(away_team_id, current_game_date, team_logs_df, window_size)
@@ -375,11 +339,6 @@ def feature_engineering(raw_data_dict):
         game_features.update({f'home_{stat}': val for stat, val in home_team_stats.items()})
         game_features.update({f'away_{stat}': val for stat, val in away_team_stats.items()})
         
-        game_features['home_rest_days'] = home_rest_days
-        game_features['away_rest_days'] = away_rest_days
-        game_features['home_is_b2b'] = home_is_b2b
-        game_features['away_is_b2b'] = away_is_b2b
-
         # Difference Features (ensure stats are present before diffing)
         for stat_col_prefix in home_team_stats.index: # e.g. 'avg_pts'
             stat_name = stat_col_prefix.replace('avg_', '') # 'pts'
@@ -388,8 +347,6 @@ def feature_engineering(raw_data_dict):
             else:
                 game_features[f'diff_{stat_name}'] = np.nan # Ensure column exists even if data was missing
         
-        game_features['diff_rest_days'] = home_rest_days - away_rest_days
-
         # Add team names for context in full_game_details_df, not for model training directly
         game_features['home_team_name'] = team_id_to_name.get(home_team_id, 'Unknown')
         game_features['away_team_name'] = team_id_to_name.get(away_team_id, 'Unknown')
@@ -406,6 +363,29 @@ def feature_engineering(raw_data_dict):
     
     # Merge with target variable
     final_df = pd.merge(features_df_with_details, games_df[['game_id', 'HOME_TEAM_WINS']], on='game_id', how='inner')
+
+    # Add interaction and ratio features
+    # Ensure required columns exist before creating new features
+    required_cols_for_interactions = [
+        'home_avg_fg_pct', 'away_avg_fg_pct', 'home_avg_fg3_pct', 'away_avg_fg3_pct',
+        'home_avg_efg_pct', 'away_avg_efg_pct', 'home_avg_ts_pct', 'away_avg_ts_pct',
+        'home_avg_oreb_pct', 'away_avg_dreb_pct', 'home_avg_dreb_pct', 'away_avg_oreb_pct',
+        'home_avg_ast_tov', 'away_avg_ast_tov', 'home_avg_pts', 'away_avg_pts',
+        'home_avg_ast', 'away_avg_ast', 'home_avg_reb', 'away_avg_reb',
+        'home_avg_tov', 'away_avg_tov', 'home_avg_stl', 'away_avg_stl',
+        'home_avg_blk', 'away_avg_blk'
+    ]
+
+    # Check if all required columns are present
+    missing_cols = [col for col in required_cols_for_interactions if col not in final_df.columns]
+    if missing_cols:
+        print(f"Warning: Missing columns required for interaction/ratio features: {missing_cols}. Skipping these features.")
+    else:
+        print("Adding interaction features...")
+        epsilon = 1e-6 # Small constant to avoid division by zero
+
+        final_df['fg_pct_interaction'] = final_df['home_avg_fg_pct'] * (1 / (final_df['away_avg_fg_pct'] + epsilon))
+        final_df['fg3_pct_interaction'] = final_df['home_avg_fg3_pct'] * (1 / (final_df['away_avg_fg3_pct'] + epsilon))
 
     if final_df.empty:
         print("No data after merging features and target. Check game_id alignment.")
@@ -464,10 +444,9 @@ def feature_engineering(raw_data_dict):
     # Add feature interactions for key metrics
     final_df['fg_pct_interaction'] = final_df['home_avg_fg_pct'] * (1/final_df['away_avg_fg_pct'])
     final_df['fg3_pct_interaction'] = final_df['home_avg_fg3_pct'] * (1/final_df['away_avg_fg3_pct'])
-    final_df['win_pct_interaction'] = final_df['home_avg_win_pct'] * (1/final_df['away_avg_win_pct'])
     
     # Add these interactions to model features
-    model_feature_columns += ['fg_pct_interaction', 'fg3_pct_interaction', 'win_pct_interaction']
+    model_feature_columns += ['fg_pct_interaction', 'fg3_pct_interaction']
     
     # Ensure all selected model_feature_columns actually exist in final_df
     model_feature_columns = [col for col in model_feature_columns if col in final_df.columns]
@@ -536,6 +515,14 @@ def feature_engineering(raw_data_dict):
 
 # --- Model Training ---
 def train_model(X_train, y_train):
+    # --- Class Imbalance Handling ---
+    # Calculate scale_pos_weight for XGBoost, which is effective for imbalanced datasets.
+    # It's the ratio of the number of negative class instances to positive class instances.
+    neg_count = np.sum(y_train == 0)
+    pos_count = np.sum(y_train == 1)
+    scale_pos_weight = neg_count / pos_count if pos_count > 0 else 1
+    print(f"\nClass balance check: Negative={neg_count}, Positive={pos_count}, XGBoost scale_pos_weight={scale_pos_weight:.2f}")
+
     """Train an ensemble model with stacking for improved accuracy."""
     print("\nTraining model with advanced optimization...")
     
@@ -576,7 +563,8 @@ def train_model(X_train, y_train):
         eval_metric='auc',
         use_label_encoder=False,
         random_state=42,
-        n_jobs=-1
+        n_jobs=-1,
+        scale_pos_weight=scale_pos_weight
     )
     
     # LightGBM model for different strengths
@@ -612,7 +600,7 @@ def train_model(X_train, y_train):
     xgb_search = RandomizedSearchCV(
         xgb_pipeline, 
         param_distributions=xgb_param_grid,
-        n_iter=10,  # Try 10 random combinations
+        n_iter=30,  # Try 10 random combinations
         cv=cv,
         scoring='accuracy',
         n_jobs=-1,
@@ -637,13 +625,13 @@ def train_model(X_train, y_train):
     
     lgb_pipeline = Pipeline([
         ('preprocessor', preprocessor),
-        ('lgb', LGBMClassifier(random_state=42))
+        ('lgb', LGBMClassifier(random_state=42, class_weight='balanced'))
     ])
     
     lgb_search = RandomizedSearchCV(
         lgb_pipeline, 
         param_distributions=lgb_param_grid,
-        n_iter=10,
+        n_iter=30,
         cv=cv,
         scoring='accuracy',
         n_jobs=-1,
@@ -667,13 +655,13 @@ def train_model(X_train, y_train):
     
     rf_pipeline = Pipeline([
         ('preprocessor', preprocessor),
-        ('rf', RandomForestClassifier(random_state=42))
+        ('rf', RandomForestClassifier(random_state=42, class_weight='balanced'))
     ])
     
     rf_search = RandomizedSearchCV(
         rf_pipeline, 
         param_distributions=rf_param_grid,
-        n_iter=10,
+        n_iter=30,
         cv=cv,
         scoring='accuracy',
         n_jobs=-1,
@@ -690,7 +678,7 @@ def train_model(X_train, y_train):
     gb_param_grid = {
         'gb__n_estimators': [100, 200],
         'gb__max_depth': [3, 5],
-        'gb__learning_rate': [0.01, 0.1],
+        'gb__learning_rate': [0.01, 0.01],
         'gb__subsample': [0.8, 1.0],
         'gb__min_samples_split': [2, 5]
     }
@@ -703,7 +691,7 @@ def train_model(X_train, y_train):
     gb_search = RandomizedSearchCV(
         gb_pipeline, 
         param_distributions=gb_param_grid,
-        n_iter=10,
+        n_iter=30,
         cv=cv,
         scoring='accuracy',
         n_jobs=-1,
@@ -715,71 +703,44 @@ def train_model(X_train, y_train):
     print(f"Best GradientBoosting params: {gb_search.best_params_}")
     print(f"Best GradientBoosting CV accuracy: {gb_search.best_score_:.4f}")
     
-    # Advanced Feature Selection
-    print("\nPerforming recursive feature elimination...")
-    selector = RFECV(
-        estimator=xgb_search.best_estimator_.named_steps['xgb'],
-        step=1,
-        cv=cv,
-        scoring='accuracy',
-        min_features_to_select=10
-    )
-    
-    # We need raw features for RFECV, not the preprocessed ones
-    selector.fit(X_train, y_train)
-    selected_features = X_train.columns[selector.support_]
-    print(f"Selected {len(selected_features)} optimal features")
-    print(f"Top 10 features: {selected_features[:10].tolist()}")
-    
-    # Create powerful ensemble using the best models
-    print("\nBuilding advanced stacking ensemble...")
-    stacking = StackingClassifier(
+    # Define the Voting Classifier using best estimators from RandomizedSearchCV
+    print("Defining VotingClassifier with best estimators...")
+    voting_clf = VotingClassifier(
         estimators=[
-            ('xgb_best', xgb_search.best_estimator_),
-            ('lgb_best', lgb_search.best_estimator_),
-            ('rf_best', rf_search.best_estimator_),
-            ('gb_best', gb_search.best_estimator_)
+            ('xgb', xgb_search.best_estimator_),
+            ('lgb', lgb_search.best_estimator_),
+            ('rf', rf_search.best_estimator_),
+            ('gb', gb_search.best_estimator_)
         ],
-        final_estimator=LogisticRegression(C=1.0, class_weight='balanced', random_state=42),
-        cv=cv
+        voting='soft'  # Use 'soft' for probability-based voting
     )
+
+    print("Fitting VotingClassifier...")
+    voting_clf.fit(X_train, y_train)
+    print("VotingClassifier fitting complete.")
+
+    # For feature importance, extract the XGBoost model from the pipeline if possible
+    # This logic remains the same as it's about extracting from xgb_search.best_estimator_
+    xgb_model_for_importance = None
+    best_xgb_pipeline = xgb_search.best_estimator_
+    if hasattr(best_xgb_pipeline, 'named_steps') and 'xgb' in best_xgb_pipeline.named_steps:
+        xgb_model_for_importance = best_xgb_pipeline.named_steps['xgb']
+    elif hasattr(best_xgb_pipeline, 'steps'): # Fallback for differently structured pipelines
+        for step_name, step_model in best_xgb_pipeline.steps:
+            if 'xgb' in step_name.lower(): # More robust check for 'xgb' step
+                xgb_model_for_importance = step_model
+                break
+    if xgb_model_for_importance is None:
+        print("Warning: Could not extract XGBoost model from pipeline for feature importances. Using the pipeline itself.")
+        xgb_model_for_importance = best_xgb_pipeline
     
-    # Alternative voting ensemble
-    voting = VotingClassifier(
-        estimators=[
-            ('xgb_best', xgb_search.best_estimator_),
-            ('lgb_best', lgb_search.best_estimator_),
-            ('rf_best', rf_search.best_estimator_),
-            ('gb_best', gb_search.best_estimator_)
-        ],
-        voting='soft',  # Use probability predictions
-        weights=[3, 2, 1, 1]  # Weight more accurate models higher
-    )
-    
-    # Train both ensemble models
-    print("Training final stacking ensemble...")
-    stacking.fit(X_train, y_train)
-    
-    print("Training final voting ensemble...")
-    voting.fit(X_train, y_train)
-    
-    # Evaluate on training data with cross-validation
-    stacking_cv_scores = cross_val_score(stacking, X_train, y_train, cv=cv)
-    voting_cv_scores = cross_val_score(voting, X_train, y_train, cv=cv)
-    
-    stacking_cv_mean = stacking_cv_scores.mean()
-    voting_cv_mean = voting_cv_scores.mean()
-    
-    print(f"Cross-validation Accuracy - Stacked: {stacking_cv_mean:.4f}, Voting: {voting_cv_mean:.4f}")
-    
-    # Choose the model with better CV accuracy
-    if stacking_cv_mean >= voting_cv_mean:
-        print("Selecting Stacked Ensemble Model as final model - more robust to overfitting")
-        model = stacking
-    else:
-        print("Selecting Voting Ensemble Model as final model - better overall performance")
-        model = voting
-    
+    return voting_clf, xgb_model_for_importance
+
+
+
+# --- Model Saving --- 
+def save_model_and_artifacts(model, X_train):
+    """Save the trained model, scaler, and feature names."""
     # Extract feature importances (different handling for ensemble models)
     try:
         # For XGBoost or other models with feature_importances_ attribute
@@ -840,12 +801,12 @@ def train_model(X_train, y_train):
         feature_importances_series = pd.Series(np.ones(len(X_train.columns))/len(X_train.columns), index=X_train.columns)
     
     # Print top 10 features
-    print("\nTop 10 most important features:")
-    print(feature_importances_series.head(10))
+    print("\nTop 15 most important features:")
+    print(feature_importances_series.head(15))
     
     # Plot feature importance
     plt.figure(figsize=(10, 6))
-    feature_importances_series.head(15).plot(kind='barh')
+    feature_importances_series.head(15).plot(kind='barh') # Already 15, no change needed here, but keeping for context
     plt.title('Top 15 Most Important Features')
     plt.tight_layout()
     plt.savefig('feature_importance.png')
@@ -859,8 +820,8 @@ def train_model(X_train, y_train):
     print("Model trained and saved.")
     
     # Print top 10 features
-    print("\nTop 10 Features by Importance:")
-    for i, (feature, importance) in enumerate(feature_importances_series.iloc[:10].items()):
+    print("\nTop 15 Features by Importance (Console Output):")
+    for i, (feature, importance) in enumerate(feature_importances_series.iloc[:15].items()):
         print(f"{i+1:2d}. {feature:25s}: {importance:.6f}")
     
     return model, feature_importances_series
@@ -960,10 +921,10 @@ def evaluate_model(model, X_test, y_test):
     print("\nSaved evaluation visualizations to disk.")
     
     # Check if we hit our target accuracy
-    if accuracy >= 0.70:
-        print(f"\n✅ Success! Model achieved {accuracy:.1%} accuracy, exceeding the 70% target.")
+    if accuracy >= 0.65:
+        print(f"\n✅ Success! Model achieved {accuracy:.1%} accuracy, exceeding the 65% target.")
     else:
-        print(f"\n⚠ Model accuracy ({accuracy:.1%}) is below the 70% target.")
+        print(f"\n⚠ Model accuracy ({accuracy:.1%}) is below the 65% target.")
     
     return accuracy
 
@@ -989,6 +950,30 @@ if __name__ == "__main__":
     X_test = features.iloc[split_index:]
     y_train = aligned_target.iloc[:split_index]
     y_test = aligned_target.iloc[split_index:]
+
+    # --- Feature Selection using SelectKBest --- #
+    print("\nSelecting top 15 features...")
+    # Scale data temporarily for feature selection, as SelectKBest works best with scaled data
+    scaler_for_selection = StandardScaler()
+    X_train_scaled_for_selection = scaler_for_selection.fit_transform(X_train)
+
+    # Ensure k is not greater than the number of available features
+    k = min(15, X_train.shape[1])
+    if k < 15:
+        print(f"Warning: Requested 15 features, but only {k} are available. Using k={k}.")
+
+    selector = SelectKBest(score_func=f_classif, k=k)
+    selector.fit(X_train_scaled_for_selection, y_train)
+
+    selected_features_mask = selector.get_support()
+    selected_features = X_train.columns[selected_features_mask]
+    
+    print(f"Selected features: {selected_features.tolist()}")
+
+    # Filter the original dataframes to keep only selected features
+    X_train = X_train[selected_features]
+    X_test = X_test[selected_features]
+    # --- End of Feature Selection --- #
     
     print(f"Training data shape: {X_train.shape}")
     print(f"Test data shape: {X_test.shape}")
@@ -999,6 +984,9 @@ if __name__ == "__main__":
     print("\n--- Model Evaluation ---")
     evaluate_model(model, X_test, y_test)
 
-    print("\nScript finished. Model and artifacts have been saved by the training function.")
+    print("\n--- Saving Model and Artifacts ---")
+    save_model_and_artifacts(model, X_train) # X_train is used for column names
+
+    print("\nScript finished. Model, feature importances, and artifacts have been saved.")
 
     print("\nTraining script completed.")

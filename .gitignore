@@ -24,3 +24,4 @@ __pycache__/feature_utils.cpython-310.pyc
 test_supabase.py
 feature_importance.png
 check_team_logs.py
+model_columns.joblib
